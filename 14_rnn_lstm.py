@@ -1066,11 +1066,40 @@ WEIGHT SHARING:
     ablation_experiments()
     results = benchmark_patterns()
 
-    fig = visualize_gate_activations()
-    save_path = '/Users/sid47/ML Algorithms/14_rnn_lstm.png'
-    fig.savefig(save_path, dpi=100, bbox_inches='tight')
-    print(f"\nSaved to: {save_path}")
-    plt.close(fig)
+    # Generate visualizations
+    print("\nGenerating visualizations...")
+
+    # 1. Vanishing gradient visualization (THE KEY INSIGHT)
+    print("1. Generating vanishing gradient visualization...")
+    fig1 = visualize_vanishing_gradient()
+    save_path1 = '/Users/sid47/ML Algorithms/14_rnn_lstm_vanishing.png'
+    fig1.savefig(save_path1, dpi=150, bbox_inches='tight')
+    print(f"   Saved to: {save_path1}")
+    plt.close(fig1)
+
+    # 2. LSTM gate dynamics (detailed)
+    print("2. Generating LSTM gate dynamics visualization...")
+    fig2 = visualize_lstm_gates_detailed()
+    save_path2 = '/Users/sid47/ML Algorithms/14_rnn_lstm_gates.png'
+    fig2.savefig(save_path2, dpi=150, bbox_inches='tight')
+    print(f"   Saved to: {save_path2}")
+    plt.close(fig2)
+
+    # 3. RNN vs LSTM training dynamics
+    print("3. Generating training dynamics visualization...")
+    fig3 = visualize_rnn_vs_lstm_training()
+    save_path3 = '/Users/sid47/ML Algorithms/14_rnn_lstm_training.png'
+    fig3.savefig(save_path3, dpi=150, bbox_inches='tight')
+    print(f"   Saved to: {save_path3}")
+    plt.close(fig3)
+
+    # 4. Original gate activations (backward compatibility)
+    print("4. Generating gate activations visualization...")
+    fig4 = visualize_gate_activations()
+    save_path4 = '/Users/sid47/ML Algorithms/14_rnn_lstm.png'
+    fig4.savefig(save_path4, dpi=100, bbox_inches='tight')
+    print(f"   Saved to: {save_path4}")
+    plt.close(fig4)
 
     print("\n" + "="*60)
     print("SUMMARY")
@@ -1082,4 +1111,27 @@ WEIGHT SHARING:
 4. Forget gate f ≈ 1 → preserve memory
 5. Cell state = gradient highway through time
 6. Weight sharing in TIME (like CNN in space)
+
+===============================================================
+THE KEY INSIGHT (see 14_rnn_lstm_vanishing.png):
+===============================================================
+
+    RNN gradients decay EXPONENTIALLY through time:
+        ∂h_t/∂h_1 = λ^t  where λ < 1 typically
+
+    After 50 timesteps: 0.9^50 ≈ 0.005 (nearly zero!)
+
+    LSTM solves this with the CELL STATE HIGHWAY:
+        c_t = f_t * c_{t-1} + i_t * c̃_t
+
+    When forget gate f ≈ 1: gradient flows unchanged!
+    This is why LSTM can learn long-range dependencies.
+
+VISUALIZATIONS GENERATED:
+    1. 14_rnn_lstm_vanishing.png — THE KEY: RNN vs LSTM on sequence length
+    2. 14_rnn_lstm_gates.png     — How LSTM gates control memory
+    3. 14_rnn_lstm_training.png  — Training dynamics comparison
+    4. 14_rnn_lstm.png           — Gate activations over time
+
+NEXT: Transformer — attention replaces recurrence
     """)
