@@ -677,6 +677,333 @@ def visualize_gate_activations():
     return fig
 
 
+def visualize_vanishing_gradient():
+    """
+    THE KEY VISUALIZATION: Show vanishing gradients in RNN vs LSTM.
+
+    This demonstrates WHY RNN fails on long sequences:
+    - Gradients must flow backward through EVERY timestep
+    - In RNN: gradient shrinks exponentially
+    - In LSTM: gradient highway keeps it flowing
+    """
+    np.random.seed(42)
+
+    fig = plt.figure(figsize=(16, 12))
+
+    # ============ Part 1: RNN vs LSTM Accuracy by Sequence Length ============
+    ax1 = fig.add_subplot(2, 2, 1)
+
+    lengths = [5, 10, 15, 20, 30, 40, 50]
+    rnn_accs = []
+    lstm_accs = []
+
+    print("Computing RNN vs LSTM accuracy by sequence length...")
+    for seq_len in lengths:
+        X_train, X_test, y_train, y_test = create_sequence_dataset(
+            n_samples=600, seq_len=seq_len, pattern='delayed')
+
+        # RNN
+        rnn = SimpleRNN(input_size=1, hidden_size=32, output_size=2)
+        rnn.fit(X_train, y_train, epochs=100, lr=0.05, verbose=False)
+        rnn_acc = accuracy(y_test, rnn.predict(X_test))
+        rnn_accs.append(rnn_acc)
+
+        # LSTM
+        lstm = LSTM(input_size=1, hidden_size=32, output_size=2)
+        lstm.fit(X_train, y_train, epochs=100, lr=0.05, verbose=False)
+        lstm_acc = accuracy(y_test, lstm.predict(X_test))
+        lstm_accs.append(lstm_acc)
+
+    ax1.plot(lengths, rnn_accs, 'r-o', label='RNN', linewidth=2, markersize=8)
+    ax1.plot(lengths, lstm_accs, 'b-o', label='LSTM', linewidth=2, markersize=8)
+    ax1.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5, label='Random guess')
+    ax1.set_xlabel('Sequence Length', fontsize=11)
+    ax1.set_ylabel('Accuracy', fontsize=11)
+    ax1.set_title('THE KEY TEST: Long-Range Dependency\n(Classify by FIRST element only)', fontsize=11, fontweight='bold')
+    ax1.legend(fontsize=10)
+    ax1.set_ylim(0.4, 1.05)
+    ax1.grid(True, alpha=0.3)
+
+    # Add annotation
+    ax1.annotate('RNN collapses\nto random!', xy=(40, rnn_accs[-2]),
+                xytext=(30, 0.65), fontsize=10, color='red',
+                arrowprops=dict(arrowstyle='->', color='red'))
+    ax1.annotate('LSTM maintains\nperformance', xy=(40, lstm_accs[-2]),
+                xytext=(25, 0.95), fontsize=10, color='blue',
+                arrowprops=dict(arrowstyle='->', color='blue'))
+
+    # ============ Part 2: Gradient Flow Illustration ============
+    ax2 = fig.add_subplot(2, 2, 2)
+
+    # Theoretical gradient decay
+    timesteps = np.arange(1, 51)
+    # RNN: gradient decays as λ^t where λ < 1 typically
+    lambda_rnn = 0.9  # Typical eigenvalue magnitude
+    rnn_gradient = lambda_rnn ** timesteps
+
+    # LSTM: gradient can stay constant (when forget gate ≈ 1)
+    lstm_gradient = np.ones_like(timesteps) * 0.8  # Simplified - stays roughly constant
+
+    ax2.semilogy(timesteps, rnn_gradient, 'r-', linewidth=2, label='RNN gradient')
+    ax2.semilogy(timesteps, lstm_gradient, 'b-', linewidth=2, label='LSTM gradient (cell state path)')
+    ax2.fill_between(timesteps, rnn_gradient, alpha=0.3, color='red')
+    ax2.fill_between(timesteps, lstm_gradient, alpha=0.3, color='blue')
+    ax2.set_xlabel('Timesteps Back', fontsize=11)
+    ax2.set_ylabel('Gradient Magnitude (log scale)', fontsize=11)
+    ax2.set_title('WHY: Gradient Vanishes in RNN\n(∂h_t/∂h_1 = λ^t where λ<1)', fontsize=11, fontweight='bold')
+    ax2.legend(fontsize=10)
+    ax2.grid(True, alpha=0.3)
+
+    # ============ Part 3: Memory Retention Test ============
+    ax3 = fig.add_subplot(2, 2, 3)
+
+    # Train on delayed pattern with different delays
+    delays = [2, 5, 10, 15, 20, 25]
+    rnn_memory = []
+    lstm_memory = []
+
+    print("Computing memory retention...")
+    for delay in delays:
+        # Create dataset where class depends on element at position 0
+        # but we pad with `delay` more timesteps after
+        X_train, X_test, y_train, y_test = create_sequence_dataset(
+            n_samples=600, seq_len=delay + 5, pattern='delayed')
+
+        rnn = SimpleRNN(input_size=1, hidden_size=32, output_size=2)
+        rnn.fit(X_train, y_train, epochs=80, lr=0.05, verbose=False)
+        rnn_memory.append(accuracy(y_test, rnn.predict(X_test)))
+
+        lstm = LSTM(input_size=1, hidden_size=32, output_size=2)
+        lstm.fit(X_train, y_train, epochs=80, lr=0.05, verbose=False)
+        lstm_memory.append(accuracy(y_test, lstm.predict(X_test)))
+
+    ax3.bar(np.array(delays) - 1.5, rnn_memory, width=3, label='RNN', color='red', alpha=0.7)
+    ax3.bar(np.array(delays) + 1.5, lstm_memory, width=3, label='LSTM', color='blue', alpha=0.7)
+    ax3.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5)
+    ax3.set_xlabel('Delay (timesteps to remember)', fontsize=11)
+    ax3.set_ylabel('Accuracy', fontsize=11)
+    ax3.set_title('MEMORY TEST: How Far Back Can It Remember?', fontsize=11, fontweight='bold')
+    ax3.legend(fontsize=10)
+    ax3.set_ylim(0.4, 1.05)
+
+    # ============ Part 4: Explanation ============
+    ax4 = fig.add_subplot(2, 2, 4)
+    ax4.axis('off')
+
+    explanation = """
+    THE VANISHING GRADIENT PROBLEM
+    ══════════════════════════════════════
+
+    RNN backpropagation through time:
+
+        ∂L     ∂L    ∂h_T   ∂h_{T-1}       ∂h_2
+       ─── = ─── × ──── × ─────── × ... × ────
+       ∂h_1   ∂h_T  ∂h_{T-1} ∂h_{T-2}       ∂h_1
+
+    Each term ∂h_t/∂h_{t-1} involves W_hh.
+    If |eigenvalue| < 1 → gradient → 0
+    If |eigenvalue| > 1 → gradient → ∞
+
+    LSTM SOLUTION: The Cell State Highway
+    ═════════════════════════════════════
+
+        c_t = f_t ⊙ c_{t-1} + i_t ⊙ c̃_t
+
+    When forget gate f ≈ 1 and input gate i ≈ 0:
+        c_t ≈ c_{t-1}  (information preserved!)
+
+    Gradient through cell state:
+        ∂c_t/∂c_{t-1} = f_t  (can be ≈ 1)
+
+    → Gradient flows unchanged through time!
+    → This is the "gradient highway"
+    """
+
+    ax4.text(0.05, 0.95, explanation, transform=ax4.transAxes, fontsize=10,
+             verticalalignment='top', fontfamily='monospace',
+             bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+
+    plt.suptitle('VANISHING GRADIENTS: Why RNN Fails and LSTM Succeeds\n'
+                 'RNN gradients decay exponentially, LSTM provides a gradient highway',
+                 fontsize=13, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    return fig
+
+
+def visualize_lstm_gates_detailed():
+    """
+    Detailed LSTM gate visualization showing how gates control information flow.
+    """
+    np.random.seed(42)
+
+    # Train LSTM on delayed pattern
+    X_train, X_test, y_train, y_test = create_sequence_dataset(
+        n_samples=600, seq_len=20, pattern='delayed')
+
+    lstm = LSTM(input_size=1, hidden_size=16, output_size=2)
+    lstm.fit(X_train, y_train, epochs=100, lr=0.05, verbose=False)
+
+    # Get samples from each class
+    idx_class0 = np.where(y_test == 0)[0][0]
+    idx_class1 = np.where(y_test == 1)[0][0]
+
+    fig = plt.figure(figsize=(16, 10))
+
+    for plot_idx, (idx, class_label) in enumerate([(idx_class0, 'Class 0 (first<0)'),
+                                                    (idx_class1, 'Class 1 (first>0)')]):
+        sample = X_test[idx:idx+1]
+        _ = lstm.forward(sample)
+
+        gates = lstm.cache['gates']
+        seq_len = sample.shape[1]
+
+        # Average gates across all hidden units
+        forget_gates = np.array([g[0][0].mean() for g in gates])
+        input_gates = np.array([g[1][0].mean() for g in gates])
+        output_gates = np.array([g[2][0].mean() for g in gates])
+
+        c_states = np.array([c[0].mean() for c in lstm.cache['c_states'][1:]])
+        h_states = np.array([h[0].mean() for h in lstm.cache['h_states'][1:]])
+
+        # Plot input
+        ax1 = fig.add_subplot(2, 4, plot_idx * 4 + 1)
+        ax1.plot(sample[0, :, 0], 'k-o', markersize=4)
+        ax1.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+        ax1.scatter([0], [sample[0, 0, 0]], color='red' if class_label == 'Class 0 (first<0)' else 'green',
+                   s=100, zorder=5, label='First element (decision)')
+        ax1.set_title(f'{class_label}\nInput Sequence', fontsize=10)
+        ax1.set_xlabel('Time')
+        ax1.legend(fontsize=8)
+
+        # Plot gates
+        ax2 = fig.add_subplot(2, 4, plot_idx * 4 + 2)
+        ax2.plot(forget_gates, 'r-', label='Forget', linewidth=2)
+        ax2.plot(input_gates, 'g-', label='Input', linewidth=2)
+        ax2.plot(output_gates, 'b-', label='Output', linewidth=2)
+        ax2.set_title('Gate Activations (avg)', fontsize=10)
+        ax2.set_xlabel('Time')
+        ax2.set_ylim(0, 1)
+        ax2.legend(fontsize=8)
+        ax2.axvline(x=0, color='red', linestyle='--', alpha=0.5)
+
+        # Plot cell state
+        ax3 = fig.add_subplot(2, 4, plot_idx * 4 + 3)
+        ax3.plot(c_states, 'm-', linewidth=2)
+        ax3.set_title('Cell State (memory)', fontsize=10)
+        ax3.set_xlabel('Time')
+        ax3.axvline(x=0, color='red', linestyle='--', alpha=0.5)
+        ax3.axhline(y=0, color='gray', linestyle='--', alpha=0.3)
+
+        # Plot hidden state
+        ax4 = fig.add_subplot(2, 4, plot_idx * 4 + 4)
+        ax4.plot(h_states, 'c-', linewidth=2)
+        ax4.set_title('Hidden State (output)', fontsize=10)
+        ax4.set_xlabel('Time')
+        ax4.axvline(x=0, color='red', linestyle='--', alpha=0.5)
+        ax4.axhline(y=0, color='gray', linestyle='--', alpha=0.3)
+
+    plt.suptitle('LSTM Gate Dynamics: How Memory is Controlled\n'
+                 'Red dashed line = first timestep (where the decision info is)',
+                 fontsize=12, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    return fig
+
+
+def visualize_rnn_vs_lstm_training():
+    """
+    Show training dynamics: RNN vs LSTM learning curves on long sequences.
+    """
+    np.random.seed(42)
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+    # Long sequence delayed pattern
+    X_train, X_test, y_train, y_test = create_sequence_dataset(
+        n_samples=600, seq_len=30, pattern='delayed')
+
+    # Train RNN
+    rnn = SimpleRNN(input_size=1, hidden_size=32, output_size=2)
+    rnn_losses = rnn.fit(X_train, y_train, epochs=150, lr=0.05, verbose=False)
+
+    # Train LSTM
+    lstm = LSTM(input_size=1, hidden_size=32, output_size=2)
+    lstm_losses = lstm.fit(X_train, y_train, epochs=150, lr=0.05, verbose=False)
+
+    # Plot 1: Loss curves
+    ax1 = axes[0]
+    ax1.plot(rnn_losses, 'r-', label='RNN', linewidth=2)
+    ax1.plot(lstm_losses, 'b-', label='LSTM', linewidth=2)
+    ax1.axhline(y=np.log(2), color='gray', linestyle='--', alpha=0.5, label='Random (log(2))')
+    ax1.set_xlabel('Epoch', fontsize=11)
+    ax1.set_ylabel('Loss', fontsize=11)
+    ax1.set_title('Training Loss (seq_len=30, delayed pattern)', fontsize=11, fontweight='bold')
+    ax1.legend(fontsize=10)
+    ax1.grid(True, alpha=0.3)
+
+    # Plot 2: Training accuracy over time
+    ax2 = axes[1]
+
+    # Recompute with accuracy tracking
+    rnn = SimpleRNN(input_size=1, hidden_size=32, output_size=2)
+    lstm = LSTM(input_size=1, hidden_size=32, output_size=2)
+
+    rnn_accs = []
+    lstm_accs = []
+
+    for epoch in range(150):
+        # RNN
+        h_final, _ = rnn.forward(X_train)
+        logits = rnn.output(h_final)
+        rnn.backward(y_train, lr=0.05)
+        rnn_accs.append(accuracy(y_test, rnn.predict(X_test)))
+
+        # LSTM
+        h_final = lstm.forward(X_train)
+        logits = lstm.output(h_final)
+        lstm.backward(y_train, lr=0.05)
+        lstm_accs.append(accuracy(y_test, lstm.predict(X_test)))
+
+    ax2.plot(rnn_accs, 'r-', label='RNN', linewidth=2)
+    ax2.plot(lstm_accs, 'b-', label='LSTM', linewidth=2)
+    ax2.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5, label='Random')
+    ax2.set_xlabel('Epoch', fontsize=11)
+    ax2.set_ylabel('Test Accuracy', fontsize=11)
+    ax2.set_title('Learning Dynamics: RNN Stuck, LSTM Learns', fontsize=11, fontweight='bold')
+    ax2.legend(fontsize=10)
+    ax2.grid(True, alpha=0.3)
+    ax2.set_ylim(0.4, 1.05)
+
+    # Plot 3: Final comparison
+    ax3 = axes[2]
+
+    rnn_final = rnn_accs[-1]
+    lstm_final = lstm_accs[-1]
+
+    bars = ax3.bar(['RNN', 'LSTM'], [rnn_final, lstm_final],
+                   color=['red', 'blue'], alpha=0.7)
+    ax3.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5)
+    ax3.set_ylabel('Final Test Accuracy', fontsize=11)
+    ax3.set_title('Final Performance\n(Long-range dependency)', fontsize=11, fontweight='bold')
+    ax3.set_ylim(0, 1.1)
+
+    # Add value labels
+    for bar, val in zip(bars, [rnn_final, lstm_final]):
+        ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                f'{val:.2f}', ha='center', fontsize=12, fontweight='bold')
+
+    # Add annotation
+    if rnn_final < 0.6:
+        ax3.text(0, rnn_final + 0.1, 'FAILS!', ha='center', color='red', fontsize=11, fontweight='bold')
+    if lstm_final > 0.8:
+        ax3.text(1, lstm_final + 0.05, 'SUCCESS!', ha='center', color='blue', fontsize=11, fontweight='bold')
+
+    plt.suptitle('RNN vs LSTM: Training on Long-Range Dependencies\n'
+                 'Task: Classify sequence by its FIRST element (must remember 30 steps)',
+                 fontsize=12, fontweight='bold', y=1.05)
+    plt.tight_layout()
+    return fig
+
+
 def benchmark_patterns():
     """Benchmark on different sequence patterns."""
     print("\n" + "="*60)
