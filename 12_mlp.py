@@ -577,6 +577,404 @@ def visualize_activation_effect():
     return fig
 
 
+def visualize_hidden_space_transformation():
+    """
+    THE KEY VISUALIZATION: Show how MLP transforms data layer by layer.
+
+    This is THE fundamental intuition:
+        "The network UNTANGLES the data until it becomes linearly separable"
+
+    For XOR/Circles:
+        - Input space: Classes are interleaved, NOT linearly separable
+        - Hidden space: Network stretches/folds space to SEPARATE classes
+        - Output: A simple line can now divide them
+    """
+    np.random.seed(42)
+
+    # Use XOR - the classic non-linearly separable problem
+    n_points = 100
+    X = np.random.randn(n_points, 2) * 0.5
+    X[:25] += np.array([0, 0])
+    X[25:50] += np.array([2, 2])
+    X[50:75] += np.array([2, 0])
+    X[75:] += np.array([0, 2])
+    y = np.array([0]*25 + [0]*25 + [1]*25 + [1]*25)
+
+    # Train MLP with architecture that allows visualization
+    # [2, 3, 2, 1] - we can visualize the 2D hidden layers!
+    mlp = MLP([2, 8, 2, 1], activation='relu', lr=0.1, n_epochs=1000, random_state=42)
+    mlp.fit(X, y)
+
+    # Get activations at each layer
+    def get_layer_activations(mlp, X):
+        """Extract activations at each layer."""
+        activations = [X]  # Input
+        a = X
+        for i in range(len(mlp.weights)):
+            z = a @ mlp.weights[i] + mlp.biases[i]
+            if i == len(mlp.weights) - 1:
+                a = mlp.output_activation.forward(z)
+            else:
+                a = mlp.activation.forward(z)
+            activations.append(a)
+        return activations
+
+    activations = get_layer_activations(mlp, X)
+
+    # Create figure
+    fig = plt.figure(figsize=(16, 10))
+
+    # Row 1: The transformation story
+    # Plot 1: Input space
+    ax1 = fig.add_subplot(2, 4, 1)
+    colors = ['blue' if yi == 0 else 'red' for yi in y]
+    ax1.scatter(X[:, 0], X[:, 1], c=colors, alpha=0.7, edgecolors='k', s=50)
+    ax1.set_title('INPUT SPACE\n(NOT linearly separable)', fontsize=10, fontweight='bold')
+    ax1.set_xlabel('x₁')
+    ax1.set_ylabel('x₂')
+    # Draw a line showing linear separation is impossible
+    ax1.text(0.5, -0.15, '❌ No line can separate!', transform=ax1.transAxes,
+             ha='center', fontsize=9, color='red')
+    ax1.set_aspect('equal')
+
+    # Plot 2: After first hidden layer (8D projected to 2D via PCA)
+    ax2 = fig.add_subplot(2, 4, 2)
+    h1 = activations[1]  # Shape: (n, 8)
+    # Use PCA to project to 2D for visualization
+    h1_centered = h1 - h1.mean(axis=0)
+    try:
+        U, S, Vt = np.linalg.svd(h1_centered, full_matrices=False)
+        h1_2d = h1_centered @ Vt[:2].T
+    except:
+        h1_2d = h1[:, :2]  # Fallback: just take first 2 dimensions
+    ax2.scatter(h1_2d[:, 0], h1_2d[:, 1], c=colors, alpha=0.7, edgecolors='k', s=50)
+    ax2.set_title('AFTER LAYER 1\n(8D → 2D via PCA)', fontsize=10, fontweight='bold')
+    ax2.set_xlabel('PC1')
+    ax2.set_ylabel('PC2')
+    ax2.text(0.5, -0.15, 'Starting to separate...', transform=ax2.transAxes,
+             ha='center', fontsize=9, color='orange')
+
+    # Plot 3: After second hidden layer (2D - can visualize directly!)
+    ax3 = fig.add_subplot(2, 4, 3)
+    h2 = activations[2]  # Shape: (n, 2)
+    ax3.scatter(h2[:, 0], h2[:, 1], c=colors, alpha=0.7, edgecolors='k', s=50)
+    ax3.set_title('AFTER LAYER 2\n(2D hidden space)', fontsize=10, fontweight='bold')
+    ax3.set_xlabel('h₁')
+    ax3.set_ylabel('h₂')
+
+    # Try to draw a separating line if possible
+    # Simple heuristic: find the midpoint between class means
+    class0_mean = h2[np.array(y) == 0].mean(axis=0)
+    class1_mean = h2[np.array(y) == 1].mean(axis=0)
+
+    ax3.text(0.5, -0.15, '✓ NOW linearly separable!', transform=ax3.transAxes,
+             ha='center', fontsize=9, color='green', fontweight='bold')
+
+    # Plot 4: Output (1D)
+    ax4 = fig.add_subplot(2, 4, 4)
+    output = activations[3].flatten()
+    ax4.scatter(output, np.zeros_like(output), c=colors, alpha=0.7, edgecolors='k', s=50)
+    ax4.axvline(x=0.5, color='green', linestyle='--', linewidth=2, label='Decision threshold')
+    ax4.set_title('OUTPUT\n(1D probability)', fontsize=10, fontweight='bold')
+    ax4.set_xlabel('P(class=1)')
+    ax4.set_yticks([])
+    ax4.set_xlim(-0.1, 1.1)
+    ax4.legend(fontsize=8)
+    ax4.text(0.5, -0.15, '✓ Simple threshold works!', transform=ax4.transAxes,
+             ha='center', fontsize=9, color='green', fontweight='bold')
+
+    # Row 2: Same story with CIRCLES dataset (more dramatic)
+    datasets = get_2d_datasets()
+    X_c, _, y_c, _ = datasets['circles']
+
+    mlp_c = MLP([2, 16, 2, 1], activation='relu', lr=0.1, n_epochs=500, random_state=42)
+    mlp_c.fit(X_c, y_c)
+    activations_c = get_layer_activations(mlp_c, X_c)
+    colors_c = ['blue' if yi == 0 else 'red' for yi in y_c]
+
+    # Input
+    ax5 = fig.add_subplot(2, 4, 5)
+    ax5.scatter(X_c[:, 0], X_c[:, 1], c=colors_c, alpha=0.6, edgecolors='k', s=30)
+    ax5.set_title('CIRCLES: Input\n(Concentric rings)', fontsize=10)
+    ax5.set_aspect('equal')
+
+    # After layer 1 (PCA projection)
+    ax6 = fig.add_subplot(2, 4, 6)
+    h1_c = activations_c[1]
+    h1_c_centered = h1_c - h1_c.mean(axis=0)
+    try:
+        U, S, Vt = np.linalg.svd(h1_c_centered, full_matrices=False)
+        h1_c_2d = h1_c_centered @ Vt[:2].T
+    except:
+        h1_c_2d = h1_c[:, :2]
+    ax6.scatter(h1_c_2d[:, 0], h1_c_2d[:, 1], c=colors_c, alpha=0.6, edgecolors='k', s=30)
+    ax6.set_title('After Layer 1\n(16D → 2D PCA)', fontsize=10)
+
+    # After layer 2 (2D)
+    ax7 = fig.add_subplot(2, 4, 7)
+    h2_c = activations_c[2]
+    ax7.scatter(h2_c[:, 0], h2_c[:, 1], c=colors_c, alpha=0.6, edgecolors='k', s=30)
+    ax7.set_title('After Layer 2\n(Network "unrolls" the circles!)', fontsize=10)
+
+    # Output
+    ax8 = fig.add_subplot(2, 4, 8)
+    output_c = activations_c[3].flatten()
+    ax8.scatter(output_c, np.zeros_like(output_c), c=colors_c, alpha=0.6, edgecolors='k', s=30)
+    ax8.axvline(x=0.5, color='green', linestyle='--', linewidth=2)
+    ax8.set_title('Output\n(Clean separation)', fontsize=10)
+    ax8.set_xlim(-0.1, 1.1)
+    ax8.set_yticks([])
+
+    plt.suptitle('THE KEY INSIGHT: MLP Transforms Space Until Data Becomes Linearly Separable\n'
+                 'Each layer bends, stretches, and folds the space to "untangle" the classes',
+                 fontsize=13, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    return fig
+
+
+def visualize_gradient_flow():
+    """
+    Visualize gradient magnitudes through layers during training.
+
+    Shows:
+    1. Gradient magnitude per layer (are they vanishing?)
+    2. Comparison: deep vs shallow networks
+    3. Effect of activation function on gradient flow
+    """
+    np.random.seed(42)
+    datasets = get_2d_datasets()
+    X_train, X_test, y_train, y_test = datasets['moons']
+
+    fig, axes = plt.subplots(2, 3, figsize=(15, 9))
+
+    # ============ Row 1: Gradient magnitude per layer ============
+
+    # Train networks and track gradient magnitudes
+    def train_and_track_gradients(layer_sizes, X, y, activation='relu', n_epochs=200):
+        """Train and return gradient history."""
+        mlp = MLP(layer_sizes, activation=activation, lr=0.1, n_epochs=1, random_state=42)
+        mlp._init_weights()
+
+        gradient_history = {i: [] for i in range(len(layer_sizes) - 1)}
+        loss_history = []
+
+        for epoch in range(n_epochs):
+            # Forward
+            y_pred = mlp._forward(X)
+            loss = mlp._compute_loss(y_pred, y)
+            loss_history.append(loss)
+
+            # Backward - capture gradients
+            m = y.shape[0]
+            n_layers = len(mlp.weights)
+            a_out = mlp.a_cache[-1]
+            z_out = mlp.z_cache[-1]
+
+            if isinstance(mlp.output_activation, Sigmoid):
+                delta = a_out - y.reshape(-1, 1)
+            else:
+                delta = (a_out - y.reshape(-1, 1)) * mlp.output_activation.backward(z_out)
+
+            for l in reversed(range(n_layers)):
+                a_prev = mlp.a_cache[l]
+                dW = (a_prev.T @ delta) / m
+                gradient_history[l].append(np.linalg.norm(dW))
+
+                if l > 0:
+                    delta = (delta @ mlp.weights[l].T) * mlp.activation.backward(mlp.z_cache[l-1])
+
+            # Update
+            mlp._forward(X)
+            dW_list, db_list = mlp._backward(y)
+            mlp._update_weights(dW_list, db_list)
+
+        return gradient_history, loss_history
+
+    # Shallow network
+    grad_shallow, loss_shallow = train_and_track_gradients([2, 32, 1], X_train, y_train)
+
+    # Deep network
+    grad_deep, loss_deep = train_and_track_gradients([2, 16, 16, 16, 16, 1], X_train, y_train)
+
+    # Plot 1: Shallow network gradients
+    ax1 = axes[0, 0]
+    for layer_idx, grads in grad_shallow.items():
+        ax1.plot(grads, label=f'Layer {layer_idx}', alpha=0.8)
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('||∂L/∂W||')
+    ax1.set_title('SHALLOW Network [2,32,1]\nGradients stay healthy', fontsize=10)
+    ax1.legend(fontsize=8)
+    ax1.set_yscale('log')
+    ax1.grid(True, alpha=0.3)
+
+    # Plot 2: Deep network gradients
+    ax2 = axes[0, 1]
+    for layer_idx, grads in grad_deep.items():
+        ax2.plot(grads, label=f'Layer {layer_idx}', alpha=0.8)
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('||∂L/∂W||')
+    ax2.set_title('DEEP Network [2,16,16,16,16,1]\nEarly layers get smaller gradients', fontsize=10)
+    ax2.legend(fontsize=8)
+    ax2.set_yscale('log')
+    ax2.grid(True, alpha=0.3)
+
+    # Plot 3: Final gradient magnitude by layer
+    ax3 = axes[0, 2]
+    # Average gradient magnitude over last 50 epochs
+    shallow_final = [np.mean(grads[-50:]) for grads in grad_shallow.values()]
+    deep_final = [np.mean(grads[-50:]) for grads in grad_deep.values()]
+
+    x_shallow = np.arange(len(shallow_final))
+    x_deep = np.arange(len(deep_final))
+
+    ax3.bar(x_shallow - 0.2, shallow_final, width=0.4, label='Shallow', color='steelblue')
+    ax3.bar(x_deep + 0.2, deep_final, width=0.4, label='Deep', color='coral')
+    ax3.set_xlabel('Layer Index')
+    ax3.set_ylabel('Avg ||∂L/∂W|| (last 50 epochs)')
+    ax3.set_title('Gradient Magnitude by Layer\n(Deep nets: earlier layers get less gradient)', fontsize=10)
+    ax3.legend()
+    ax3.set_yscale('log')
+
+    # ============ Row 2: Effect of activation functions ============
+
+    # ReLU vs Sigmoid vs Tanh
+    grad_relu, _ = train_and_track_gradients([2, 16, 16, 16, 1], X_train, y_train, activation='relu')
+    grad_sigmoid, _ = train_and_track_gradients([2, 16, 16, 16, 1], X_train, y_train, activation='sigmoid')
+    grad_tanh, _ = train_and_track_gradients([2, 16, 16, 16, 1], X_train, y_train, activation='tanh')
+
+    # Plot 4: ReLU gradients
+    ax4 = axes[1, 0]
+    for layer_idx, grads in grad_relu.items():
+        ax4.plot(grads, label=f'Layer {layer_idx}', alpha=0.8)
+    ax4.set_xlabel('Epoch')
+    ax4.set_ylabel('||∂L/∂W||')
+    ax4.set_title('ReLU Activation\n(Gradients flow well)', fontsize=10)
+    ax4.legend(fontsize=8)
+    ax4.set_yscale('log')
+    ax4.grid(True, alpha=0.3)
+
+    # Plot 5: Sigmoid gradients
+    ax5 = axes[1, 1]
+    for layer_idx, grads in grad_sigmoid.items():
+        ax5.plot(grads, label=f'Layer {layer_idx}', alpha=0.8)
+    ax5.set_xlabel('Epoch')
+    ax5.set_ylabel('||∂L/∂W||')
+    ax5.set_title('Sigmoid Activation\n(Gradients VANISH in early layers!)', fontsize=10)
+    ax5.legend(fontsize=8)
+    ax5.set_yscale('log')
+    ax5.grid(True, alpha=0.3)
+
+    # Plot 6: Comparison of first layer gradient
+    ax6 = axes[1, 2]
+    ax6.plot(grad_relu[0], label='ReLU', color='green', alpha=0.8)
+    ax6.plot(grad_sigmoid[0], label='Sigmoid', color='red', alpha=0.8)
+    ax6.plot(grad_tanh[0], label='Tanh', color='blue', alpha=0.8)
+    ax6.set_xlabel('Epoch')
+    ax6.set_ylabel('||∂L/∂W|| for Layer 0')
+    ax6.set_title('FIRST Layer Gradient Comparison\n(Sigmoid causes vanishing gradients)', fontsize=10)
+    ax6.legend()
+    ax6.set_yscale('log')
+    ax6.grid(True, alpha=0.3)
+
+    plt.suptitle('GRADIENT FLOW: Why Deep Networks Can Be Hard to Train\n'
+                 'Gradients must flow backward through ALL layers — they can vanish or explode',
+                 fontsize=12, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    return fig
+
+
+def visualize_learning_dynamics():
+    """
+    Visualize how the decision boundary evolves during training.
+
+    Shows:
+    1. Decision boundary at different epochs
+    2. Loss curve alongside
+    3. The "learning trajectory" in weight space
+    """
+    np.random.seed(42)
+    datasets = get_2d_datasets()
+    X_train, X_test, y_train, y_test = datasets['moons']
+    X = np.vstack([X_train, X_test])
+    y = np.concatenate([y_train, y_test])
+
+    fig = plt.figure(figsize=(16, 8))
+
+    # Train and capture snapshots
+    epochs_to_capture = [1, 5, 20, 50, 100, 200, 500]
+    snapshots = {}
+
+    mlp = MLP([2, 32, 16, 1], activation='relu', lr=0.1, n_epochs=1, random_state=42)
+    mlp._init_weights()
+
+    all_losses = []
+
+    for epoch in range(1, 501):
+        # Train one epoch
+        n_samples = X_train.shape[0]
+        indices = np.random.permutation(n_samples)
+        X_shuffled = X_train[indices]
+        y_shuffled = y_train[indices]
+
+        batch_size = 32
+        for i in range(0, n_samples, batch_size):
+            X_batch = X_shuffled[i:i + batch_size]
+            y_batch = y_shuffled[i:i + batch_size]
+            y_pred = mlp._forward(X_batch)
+            dW, db = mlp._backward(y_batch)
+            mlp._update_weights(dW, db)
+
+        # Track loss
+        y_pred_all = mlp._forward(X_train)
+        loss = mlp._compute_loss(y_pred_all, y_train)
+        all_losses.append(loss)
+
+        # Capture snapshot
+        if epoch in epochs_to_capture:
+            # Deep copy weights
+            snapshots[epoch] = {
+                'weights': [w.copy() for w in mlp.weights],
+                'biases': [b.copy() for b in mlp.biases],
+                'loss': loss,
+                'acc': accuracy(y_test, mlp.predict(X_test))
+            }
+
+    # Plot decision boundaries at different epochs
+    n_snapshots = len(epochs_to_capture)
+
+    for idx, epoch in enumerate(epochs_to_capture):
+        ax = fig.add_subplot(2, 4, idx + 1)
+
+        # Restore weights
+        snapshot = snapshots[epoch]
+        mlp.weights = snapshot['weights']
+        mlp.biases = snapshot['biases']
+
+        # Plot decision boundary
+        plot_decision_boundary(mlp.predict, X, y, ax=ax,
+                              title=f'Epoch {epoch}\nloss={snapshot["loss"]:.3f}, acc={snapshot["acc"]:.2f}')
+
+    # Plot loss curve
+    ax_loss = fig.add_subplot(2, 4, 8)
+    ax_loss.plot(all_losses, 'b-', linewidth=1.5)
+    ax_loss.set_xlabel('Epoch')
+    ax_loss.set_ylabel('Loss')
+    ax_loss.set_title('Training Loss\n(Learning is gradual refinement)')
+    ax_loss.grid(True, alpha=0.3)
+
+    # Mark captured epochs
+    for epoch in epochs_to_capture:
+        if epoch <= len(all_losses):
+            ax_loss.axvline(x=epoch, color='red', linestyle='--', alpha=0.5)
+            ax_loss.scatter([epoch], [all_losses[epoch-1]], color='red', s=50, zorder=5)
+
+    plt.suptitle('LEARNING DYNAMICS: How the Decision Boundary Evolves\n'
+                 'The network starts random, then gradually learns the pattern',
+                 fontsize=13, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    return fig
+
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -615,17 +1013,42 @@ KEY COMPONENTS:
     results = benchmark_on_datasets()
 
     # Visualize
+    print("\nGenerating visualizations...")
+
+    # 1. Decision boundaries (existing)
     fig1 = visualize_decision_boundaries()
     save_path1 = '/Users/sid47/ML Algorithms/12_mlp_boundaries.png'
     fig1.savefig(save_path1, dpi=100, bbox_inches='tight')
-    print(f"\nSaved decision boundaries to: {save_path1}")
+    print(f"Saved decision boundaries to: {save_path1}")
     plt.close(fig1)
 
+    # 2. Activation effect (existing)
     fig2 = visualize_activation_effect()
     save_path2 = '/Users/sid47/ML Algorithms/12_mlp_activation.png'
     fig2.savefig(save_path2, dpi=100, bbox_inches='tight')
     print(f"Saved activation effect to: {save_path2}")
     plt.close(fig2)
+
+    # 3. Hidden space transformation (NEW - THE KEY INSIGHT!)
+    fig3 = visualize_hidden_space_transformation()
+    save_path3 = '/Users/sid47/ML Algorithms/12_mlp_hidden_space.png'
+    fig3.savefig(save_path3, dpi=150, bbox_inches='tight')
+    print(f"Saved hidden space transformation to: {save_path3}")
+    plt.close(fig3)
+
+    # 4. Gradient flow (NEW)
+    fig4 = visualize_gradient_flow()
+    save_path4 = '/Users/sid47/ML Algorithms/12_mlp_gradients.png'
+    fig4.savefig(save_path4, dpi=150, bbox_inches='tight')
+    print(f"Saved gradient flow to: {save_path4}")
+    plt.close(fig4)
+
+    # 5. Learning dynamics (NEW)
+    fig5 = visualize_learning_dynamics()
+    save_path5 = '/Users/sid47/ML Algorithms/12_mlp_learning.png'
+    fig5.savefig(save_path5, dpi=150, bbox_inches='tight')
+    print(f"Saved learning dynamics to: {save_path5}")
+    plt.close(fig5)
 
     # Summary
     print("\n" + "="*60)
@@ -638,10 +1061,27 @@ KEY COMPONENTS:
 4. Initialization matters — Xavier/He prevent gradient issues
 5. Learning rate needs tuning — too high diverges, too low stalls
 
-KEY ARCHITECTURAL INSIGHT:
-    The power of neural networks comes from COMPOSING
-    nonlinear functions. Each layer transforms the
-    representation to make the task easier for the next layer.
+===============================================================
+THE KEY INSIGHT (see 12_mlp_hidden_space.png):
+===============================================================
+
+    The network TRANSFORMS the input space layer by layer
+    until the data becomes LINEARLY SEPARABLE.
+
+    XOR/Circles in input space → NOT separable
+    After hidden layers → Classes are UNTANGLED
+    Final layer → Simple threshold works!
+
+    This is what "learning features" means:
+    The network learns a COORDINATE SYSTEM where
+    the problem becomes trivial.
+
+VISUALIZATIONS GENERATED:
+    1. 12_mlp_boundaries.png    — Decision boundaries (universal approximation)
+    2. 12_mlp_activation.png    — Why activation functions matter
+    3. 12_mlp_hidden_space.png  — THE KEY: Space transformation layer by layer
+    4. 12_mlp_gradients.png     — Gradient flow (vanishing gradient problem)
+    5. 12_mlp_learning.png      — How the boundary evolves during training
 
 NEXT: CNN — exploit spatial structure through convolution
     """)

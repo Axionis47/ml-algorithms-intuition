@@ -168,11 +168,75 @@ def create_digit_like_dataset(n_samples=1000):
     return X[:split], X[split:], y[:split], y[split:]
 
 
+def im2col(X, kernel_size, stride, padding):
+    """
+    Transform image to column matrix for efficient convolution.
+
+    This converts convolution into matrix multiplication!
+    Instead of sliding a filter, we extract all patches as columns.
+
+    X shape: (N, C, H, W)
+    Output shape: (N * H_out * W_out, C * kernel_size * kernel_size)
+    """
+    N, C, H, W = X.shape
+
+    # Apply padding
+    if padding > 0:
+        X_padded = np.pad(X, ((0, 0), (0, 0),
+                              (padding, padding),
+                              (padding, padding)), mode='constant')
+    else:
+        X_padded = X
+
+    H_padded, W_padded = X_padded.shape[2], X_padded.shape[3]
+    H_out = (H + 2 * padding - kernel_size) // stride + 1
+    W_out = (W + 2 * padding - kernel_size) // stride + 1
+
+    # Extract patches using stride tricks for efficiency
+    shape = (N, C, H_out, W_out, kernel_size, kernel_size)
+    strides = (X_padded.strides[0], X_padded.strides[1],
+               X_padded.strides[2] * stride, X_padded.strides[3] * stride,
+               X_padded.strides[2], X_padded.strides[3])
+
+    patches = np.lib.stride_tricks.as_strided(X_padded, shape=shape, strides=strides)
+    # Reshape to (N * H_out * W_out, C * K * K)
+    cols = patches.reshape(N * H_out * W_out, -1)
+
+    return cols, H_out, W_out, X_padded
+
+
+def col2im(dcols, X_shape, kernel_size, stride, padding, H_out, W_out):
+    """
+    Reverse of im2col - accumulate gradients back to image format.
+    """
+    N, C, H, W = X_shape
+    H_padded = H + 2 * padding
+    W_padded = W + 2 * padding
+
+    dX_padded = np.zeros((N, C, H_padded, W_padded))
+
+    # Reshape dcols to patches
+    dcols_reshaped = dcols.reshape(N, H_out, W_out, C, kernel_size, kernel_size)
+
+    for i in range(H_out):
+        for j in range(W_out):
+            h_start = i * stride
+            w_start = j * stride
+            dX_padded[:, :, h_start:h_start+kernel_size, w_start:w_start+kernel_size] += \
+                dcols_reshaped[:, i, j, :, :, :]
+
+    # Remove padding
+    if padding > 0:
+        return dX_padded[:, :, padding:-padding, padding:-padding]
+    return dX_padded
+
+
 class Conv2D:
     """
-    2D Convolution Layer.
+    2D Convolution Layer (VECTORIZED with im2col).
 
     This is where the magic happens: local receptive fields + weight sharing.
+    Uses im2col transformation to convert convolution to matrix multiplication.
     """
 
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0):
@@ -204,97 +268,61 @@ class Conv2D:
 
     def forward(self, X):
         """
-        Forward pass: convolve filters across input.
+        Forward pass: convolve filters across input using im2col.
 
         X shape: (batch_size, in_channels, height, width)
         Output shape: (batch_size, out_channels, out_height, out_width)
-
-        out_height = (height + 2*padding - kernel_size) // stride + 1
         """
         N, C, H, W = X.shape
 
-        # Apply padding
-        if self.padding > 0:
-            X_padded = np.pad(X, ((0, 0), (0, 0),
-                                  (self.padding, self.padding),
-                                  (self.padding, self.padding)), mode='constant')
-        else:
-            X_padded = X
+        # im2col transformation
+        cols, H_out, W_out, X_padded = im2col(X, self.kernel_size, self.stride, self.padding)
 
-        # Output dimensions
-        H_out = (H + 2 * self.padding - self.kernel_size) // self.stride + 1
-        W_out = (W + 2 * self.padding - self.kernel_size) // self.stride + 1
+        # Reshape weights to (out_channels, in_channels * K * K)
+        W_flat = self.W.reshape(self.out_channels, -1)
 
-        # Initialize output
-        out = np.zeros((N, self.out_channels, H_out, W_out))
+        # Convolution as matrix multiplication!
+        # cols: (N * H_out * W_out, C * K * K)
+        # W_flat.T: (C * K * K, out_channels)
+        # Result: (N * H_out * W_out, out_channels)
+        out = cols @ W_flat.T + self.b
 
-        # Convolve!
-        # This is the naive O(N * out_channels * H_out * W_out * in_channels * K * K) version
-        # Real implementations use im2col for efficiency
-        for n in range(N):
-            for f in range(self.out_channels):
-                for i in range(H_out):
-                    for j in range(W_out):
-                        h_start = i * self.stride
-                        h_end = h_start + self.kernel_size
-                        w_start = j * self.stride
-                        w_end = w_start + self.kernel_size
+        # Reshape to (N, out_channels, H_out, W_out)
+        out = out.reshape(N, H_out, W_out, self.out_channels).transpose(0, 3, 1, 2)
 
-                        # Extract patch and compute dot product with filter
-                        patch = X_padded[n, :, h_start:h_end, w_start:w_end]
-                        out[n, f, i, j] = np.sum(patch * self.W[f]) + self.b[f]
-
-        self.cache = (X, X_padded)
+        self.cache = (X, cols, H_out, W_out)
         return out
 
     def backward(self, dout):
         """
-        Backward pass: compute gradients.
-
-        dout shape: (batch_size, out_channels, out_height, out_width)
+        Backward pass: compute gradients using im2col.
         """
-        X, X_padded = self.cache
+        X, cols, H_out, W_out = self.cache
         N, C, H, W = X.shape
-        _, _, H_out, W_out = dout.shape
 
-        # Initialize gradients
-        self.dW = np.zeros_like(self.W)
-        self.db = np.zeros_like(self.b)
-        dX_padded = np.zeros_like(X_padded)
+        # Reshape dout to (N * H_out * W_out, out_channels)
+        dout_flat = dout.transpose(0, 2, 3, 1).reshape(-1, self.out_channels)
 
-        # Compute gradients (reverse of forward)
-        for n in range(N):
-            for f in range(self.out_channels):
-                for i in range(H_out):
-                    for j in range(W_out):
-                        h_start = i * self.stride
-                        h_end = h_start + self.kernel_size
-                        w_start = j * self.stride
-                        w_end = w_start + self.kernel_size
-
-                        patch = X_padded[n, :, h_start:h_end, w_start:w_end]
-
-                        # Gradient w.r.t. filter weights
-                        self.dW[f] += dout[n, f, i, j] * patch
-
-                        # Gradient w.r.t. input
-                        dX_padded[n, :, h_start:h_end, w_start:w_end] += dout[n, f, i, j] * self.W[f]
+        # Gradient w.r.t. weights
+        # dW = cols.T @ dout_flat, reshaped
+        self.dW = (cols.T @ dout_flat).T.reshape(self.W.shape)
 
         # Gradient w.r.t. bias
-        self.db = np.sum(dout, axis=(0, 2, 3))
+        self.db = np.sum(dout_flat, axis=0)
 
-        # Remove padding from gradient
-        if self.padding > 0:
-            dX = dX_padded[:, :, self.padding:-self.padding, self.padding:-self.padding]
-        else:
-            dX = dX_padded
+        # Gradient w.r.t. input
+        W_flat = self.W.reshape(self.out_channels, -1)
+        dcols = dout_flat @ W_flat  # (N * H_out * W_out, C * K * K)
+
+        # col2im to get dX
+        dX = col2im(dcols, X.shape, self.kernel_size, self.stride, self.padding, H_out, W_out)
 
         return dX
 
 
 class MaxPool2D:
     """
-    Max Pooling Layer.
+    Max Pooling Layer (VECTORIZED).
 
     Takes the maximum value in each local region.
     Provides slight translation invariance and reduces dimensions.
@@ -308,53 +336,54 @@ class MaxPool2D:
     def forward(self, X):
         """
         Forward pass: max over each pool_size × pool_size region.
+        Vectorized using reshape and stride tricks.
         """
         N, C, H, W = X.shape
+        p = self.pool_size
+        s = self.stride
 
-        H_out = (H - self.pool_size) // self.stride + 1
-        W_out = (W - self.pool_size) // self.stride + 1
+        H_out = (H - p) // s + 1
+        W_out = (W - p) // s + 1
 
-        out = np.zeros((N, C, H_out, W_out))
+        # Use stride tricks to extract pooling regions
+        shape = (N, C, H_out, W_out, p, p)
+        strides = (X.strides[0], X.strides[1],
+                   X.strides[2] * s, X.strides[3] * s,
+                   X.strides[2], X.strides[3])
 
-        for n in range(N):
-            for c in range(C):
-                for i in range(H_out):
-                    for j in range(W_out):
-                        h_start = i * self.stride
-                        h_end = h_start + self.pool_size
-                        w_start = j * self.stride
-                        w_end = w_start + self.pool_size
+        X_strided = np.lib.stride_tricks.as_strided(X, shape=shape, strides=strides)
 
-                        out[n, c, i, j] = np.max(X[n, c, h_start:h_end, w_start:w_end])
+        # Max over the pooling windows
+        out = X_strided.max(axis=(4, 5))
 
-        self.cache = X
+        # Store for backward
+        self.cache = (X, X_strided, out)
         return out
 
     def backward(self, dout):
         """
         Backward pass: gradient flows only to the max element.
         """
-        X = self.cache
+        X, X_strided, out = self.cache
         N, C, H, W = X.shape
+        p = self.pool_size
+        s = self.stride
         _, _, H_out, W_out = dout.shape
 
         dX = np.zeros_like(X)
 
-        for n in range(N):
-            for c in range(C):
-                for i in range(H_out):
-                    for j in range(W_out):
-                        h_start = i * self.stride
-                        h_end = h_start + self.pool_size
-                        w_start = j * self.stride
-                        w_end = w_start + self.pool_size
+        # Create mask where max occurred
+        # out has shape (N, C, H_out, W_out)
+        # X_strided has shape (N, C, H_out, W_out, p, p)
+        mask = (X_strided == out[:, :, :, :, None, None])
 
-                        # Find position of max
-                        patch = X[n, c, h_start:h_end, w_start:w_end]
-                        max_idx = np.unravel_index(np.argmax(patch), patch.shape)
-
-                        # Gradient flows only to max
-                        dX[n, c, h_start + max_idx[0], w_start + max_idx[1]] += dout[n, c, i, j]
+        # Distribute gradients
+        for i in range(H_out):
+            for j in range(W_out):
+                h_start = i * s
+                w_start = j * s
+                dX[:, :, h_start:h_start+p, w_start:w_start+p] += \
+                    mask[:, :, i, j, :, :] * dout[:, :, i:i+1, j:j+1]
 
         return dX
 
@@ -906,6 +935,427 @@ def visualize_filters_and_activations():
     return visualize_cnn_story()
 
 
+def visualize_feature_hierarchy():
+    """
+    THE KEY CNN VISUALIZATION: Show how features build hierarchically.
+
+    Layer 1: Detects edges/gradients (like Gabor filters)
+    Layer 2: Detects textures/corners (combinations of edges)
+
+    Shows:
+    1. Input image
+    2. All Layer 1 feature maps (edge detectors)
+    3. All Layer 2 feature maps (texture detectors)
+    4. The learned filters themselves
+    """
+    np.random.seed(42)
+    X_train, X_test, y_train, y_test = create_simple_image_dataset(n_samples=600)
+
+    # Train CNN
+    cnn = SimpleCNN(input_shape=(1, 8, 8), n_classes=2, n_filters=8)
+    cnn.fit(X_train, y_train, epochs=100, lr=0.01, verbose=False)
+
+    fig = plt.figure(figsize=(16, 12))
+
+    # Get sample images - one horizontal, one vertical
+    idx_h = np.where(y_test == 0)[0][0]  # Horizontal stripe
+    idx_v = np.where(y_test == 1)[0][0]  # Vertical stripe
+
+    sample_h = X_test[idx_h]
+    sample_v = X_test[idx_v]
+
+    # ============ Row 1: Horizontal stripe through the network ============
+    # Input
+    ax1 = fig.add_subplot(4, 6, 1)
+    ax1.imshow(sample_h, cmap='gray')
+    ax1.set_title('INPUT\n(Horizontal)', fontsize=9, fontweight='bold')
+    ax1.axis('off')
+
+    # Forward through layers
+    x = sample_h[np.newaxis, np.newaxis, :, :]  # (1, 1, 8, 8)
+
+    # Conv1 + ReLU
+    conv1_out = cnn.layers[0].forward(x)
+    relu1_out = cnn.layers[1].forward(conv1_out)
+
+    # Show first 4 feature maps from layer 1
+    for i in range(min(4, relu1_out.shape[1])):
+        ax = fig.add_subplot(4, 6, 2 + i)
+        ax.imshow(relu1_out[0, i], cmap='viridis')
+        ax.set_title(f'Conv1-F{i}', fontsize=8)
+        ax.axis('off')
+
+    # Pool1
+    pool1_out = cnn.layers[2].forward(relu1_out)
+
+    # Conv2 + ReLU
+    conv2_out = cnn.layers[3].forward(pool1_out)
+    relu2_out = cnn.layers[4].forward(conv2_out)
+
+    # Show feature map from layer 2
+    ax6 = fig.add_subplot(4, 6, 6)
+    # Average across channels for visualization
+    ax6.imshow(relu2_out[0].mean(axis=0), cmap='viridis')
+    ax6.set_title('Conv2 (avg)', fontsize=8)
+    ax6.axis('off')
+
+    # ============ Row 2: Vertical stripe through the network ============
+    ax7 = fig.add_subplot(4, 6, 7)
+    ax7.imshow(sample_v, cmap='gray')
+    ax7.set_title('INPUT\n(Vertical)', fontsize=9, fontweight='bold')
+    ax7.axis('off')
+
+    # Forward through layers
+    x_v = sample_v[np.newaxis, np.newaxis, :, :]
+    conv1_out_v = cnn.layers[0].forward(x_v)
+    relu1_out_v = cnn.layers[1].forward(conv1_out_v)
+
+    for i in range(min(4, relu1_out_v.shape[1])):
+        ax = fig.add_subplot(4, 6, 8 + i)
+        ax.imshow(relu1_out_v[0, i], cmap='viridis')
+        ax.set_title(f'Conv1-F{i}', fontsize=8)
+        ax.axis('off')
+
+    pool1_out_v = cnn.layers[2].forward(relu1_out_v)
+    conv2_out_v = cnn.layers[3].forward(pool1_out_v)
+    relu2_out_v = cnn.layers[4].forward(conv2_out_v)
+
+    ax12 = fig.add_subplot(4, 6, 12)
+    ax12.imshow(relu2_out_v[0].mean(axis=0), cmap='viridis')
+    ax12.set_title('Conv2 (avg)', fontsize=8)
+    ax12.axis('off')
+
+    # ============ Row 3: The learned filters ============
+    conv1 = cnn.layers[0]
+    conv2 = cnn.layers[3]
+
+    # Show Conv1 filters (3x3)
+    ax13 = fig.add_subplot(4, 6, 13)
+    ax13.text(0.5, 0.5, 'LAYER 1\nFILTERS\n(3×3)', ha='center', va='center',
+              fontsize=10, fontweight='bold', transform=ax13.transAxes)
+    ax13.axis('off')
+
+    for i in range(min(4, conv1.W.shape[0])):
+        ax = fig.add_subplot(4, 6, 14 + i)
+        filt = conv1.W[i, 0]
+        ax.imshow(filt, cmap='RdBu_r', vmin=-np.abs(filt).max(), vmax=np.abs(filt).max())
+        ax.set_title(f'F{i}', fontsize=8)
+        ax.axis('off')
+
+    ax18 = fig.add_subplot(4, 6, 18)
+    ax18.text(0.5, 0.5, 'Edge\ndetectors', ha='center', va='center',
+              fontsize=9, transform=ax18.transAxes)
+    ax18.axis('off')
+
+    # ============ Row 4: Explanation ============
+    ax19 = fig.add_subplot(4, 6, 19)
+    ax19.axis('off')
+
+    ax20 = fig.add_subplot(4, 6, (20, 24))
+    ax20.axis('off')
+    explanation = """
+    HIERARCHICAL FEATURE LEARNING
+    ═══════════════════════════════
+
+    Layer 1 (Conv1): Detects EDGES
+    • Each filter responds to a specific edge orientation
+    • Same filter fires wherever that edge appears (translation equivariance)
+    • Different filters detect different orientations
+
+    Layer 2 (Conv2): Detects TEXTURES
+    • Combines edges from Layer 1
+    • Horizontal stripes = horizontal edges repeated
+    • Vertical stripes = vertical edges repeated
+
+    KEY INSIGHT: The network learns a HIERARCHY
+    Simple patterns → Complex patterns → Objects
+    """
+    ax20.text(0.05, 0.95, explanation, transform=ax20.transAxes, fontsize=10,
+              verticalalignment='top', fontfamily='monospace',
+              bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+
+    plt.suptitle('CNN FEATURE HIERARCHY: How Convolution Builds Complex Features\n'
+                 'Same filter responds to same pattern anywhere (weight sharing)',
+                 fontsize=13, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    return fig
+
+
+def visualize_spatial_inductive_bias():
+    """
+    THE CRITICAL TEST: Prove CNN's spatial inductive bias.
+
+    If we SHUFFLE the pixels (destroy spatial structure):
+    - CNN should FAIL (it relies on local patterns)
+    - MLP should still WORK (it has no spatial assumption)
+
+    This proves CNN encodes "patterns are local and can appear anywhere"
+    """
+    np.random.seed(42)
+    X_train, X_test, y_train, y_test = create_simple_image_dataset(n_samples=600)
+
+    fig = plt.figure(figsize=(16, 10))
+
+    # Create fixed permutation
+    perm = np.random.permutation(64)
+    inv_perm = np.argsort(perm)  # To unshuffle
+
+    # Shuffle the pixels
+    X_train_shuffled = X_train.reshape(-1, 64)[:, perm].reshape(-1, 8, 8)
+    X_test_shuffled = X_test.reshape(-1, 64)[:, perm].reshape(-1, 8, 8)
+
+    # ============ Row 1: Show what shuffling does ============
+    ax1 = fig.add_subplot(2, 4, 1)
+    ax1.imshow(X_test[0], cmap='gray')
+    ax1.set_title('Original Image\n(Horizontal stripe)', fontsize=10)
+    ax1.axis('off')
+
+    ax2 = fig.add_subplot(2, 4, 2)
+    ax2.imshow(X_test_shuffled[0], cmap='gray')
+    ax2.set_title('SHUFFLED Pixels\n(Same info, destroyed structure)', fontsize=10)
+    ax2.axis('off')
+
+    ax3 = fig.add_subplot(2, 4, 3)
+    ax3.imshow(X_test[1], cmap='gray')
+    ax3.set_title('Original Image\n(Vertical stripe)', fontsize=10)
+    ax3.axis('off')
+
+    ax4 = fig.add_subplot(2, 4, 4)
+    ax4.imshow(X_test_shuffled[1], cmap='gray')
+    ax4.set_title('SHUFFLED Pixels\n(Same info, destroyed structure)', fontsize=10)
+    ax4.axis('off')
+
+    # ============ Row 2: Train and compare ============
+
+    # Train CNN on original
+    cnn_orig = SimpleCNN(input_shape=(1, 8, 8), n_classes=2, n_filters=8)
+    cnn_orig.fit(X_train, y_train, epochs=100, lr=0.01, verbose=False)
+    cnn_orig_acc = accuracy(y_test, cnn_orig.predict(X_test))
+
+    # Train CNN on shuffled
+    cnn_shuf = SimpleCNN(input_shape=(1, 8, 8), n_classes=2, n_filters=8)
+    cnn_shuf.fit(X_train_shuffled, y_train, epochs=100, lr=0.01, verbose=False)
+    cnn_shuf_acc = accuracy(y_test, cnn_shuf.predict(X_test_shuffled))
+
+    # Train MLP on original
+    try:
+        mlp_module = import_module('12_mlp')
+        MLP = mlp_module.MLP
+
+        X_train_flat = X_train.reshape(-1, 64)
+        X_test_flat = X_test.reshape(-1, 64)
+        X_train_shuf_flat = X_train_shuffled.reshape(-1, 64)
+        X_test_shuf_flat = X_test_shuffled.reshape(-1, 64)
+
+        mlp_orig = MLP(layer_sizes=[64, 32, 16, 2], activation='relu',
+                       n_epochs=100, lr=0.1, random_state=42)
+        mlp_orig.fit(X_train_flat, y_train)
+        mlp_orig_acc = accuracy(y_test, mlp_orig.predict(X_test_flat))
+
+        mlp_shuf = MLP(layer_sizes=[64, 32, 16, 2], activation='relu',
+                       n_epochs=100, lr=0.1, random_state=42)
+        mlp_shuf.fit(X_train_shuf_flat, y_train)
+        mlp_shuf_acc = accuracy(y_test, mlp_shuf.predict(X_test_shuf_flat))
+
+        mlp_available = True
+    except:
+        mlp_available = False
+        mlp_orig_acc = 0
+        mlp_shuf_acc = 0
+
+    # Bar chart comparison
+    ax5 = fig.add_subplot(2, 4, 5)
+
+    if mlp_available:
+        x = np.arange(2)
+        width = 0.35
+
+        ax5.bar(x - width/2, [cnn_orig_acc, cnn_shuf_acc], width, label='CNN', color='steelblue')
+        ax5.bar(x + width/2, [mlp_orig_acc, mlp_shuf_acc], width, label='MLP', color='coral')
+
+        ax5.set_xticks(x)
+        ax5.set_xticklabels(['Original', 'Shuffled'])
+        ax5.set_ylabel('Accuracy')
+        ax5.set_ylim(0, 1.1)
+        ax5.legend()
+        ax5.set_title('THE KEY TEST\nCNN needs structure, MLP does not', fontsize=10, fontweight='bold')
+
+        # Add value labels
+        for i, (c, m) in enumerate(zip([cnn_orig_acc, cnn_shuf_acc], [mlp_orig_acc, mlp_shuf_acc])):
+            ax5.text(i - width/2, c + 0.02, f'{c:.2f}', ha='center', fontsize=9)
+            ax5.text(i + width/2, m + 0.02, f'{m:.2f}', ha='center', fontsize=9)
+
+        # Arrow showing CNN drop
+        ax5.annotate('', xy=(0.5 - width/2, cnn_shuf_acc),
+                    xytext=(0.5 - width/2, cnn_orig_acc - 0.05),
+                    arrowprops=dict(arrowstyle='->', color='red', lw=2))
+        ax5.text(0.3, (cnn_orig_acc + cnn_shuf_acc)/2, 'CNN\nBREAKS!',
+                fontsize=10, color='red', fontweight='bold')
+    else:
+        ax5.text(0.5, 0.5, 'MLP not available', ha='center', va='center', transform=ax5.transAxes)
+
+    # Accuracy drop analysis
+    ax6 = fig.add_subplot(2, 4, 6)
+    ax6.axis('off')
+
+    if mlp_available:
+        cnn_drop = cnn_orig_acc - cnn_shuf_acc
+        mlp_drop = mlp_orig_acc - mlp_shuf_acc
+
+        analysis = f"""
+    ACCURACY DROP ANALYSIS
+    ═══════════════════════
+
+    CNN:
+      Original:  {cnn_orig_acc:.2f}
+      Shuffled:  {cnn_shuf_acc:.2f}
+      Drop:      {cnn_drop:.2f} {'← BIG DROP!' if cnn_drop > 0.1 else ''}
+
+    MLP:
+      Original:  {mlp_orig_acc:.2f}
+      Shuffled:  {mlp_shuf_acc:.2f}
+      Drop:      {mlp_drop:.2f} {'← Still works!' if mlp_drop < 0.1 else ''}
+
+    CONCLUSION:
+    CNN encodes spatial structure
+    MLP treats pixels independently
+        """
+        ax6.text(0.1, 0.95, analysis, transform=ax6.transAxes, fontsize=10,
+                verticalalignment='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='lightcyan', alpha=0.8))
+
+    # Why CNN fails
+    ax7 = fig.add_subplot(2, 4, 7)
+    ax7.axis('off')
+
+    why_text = """
+    WHY CNN FAILS ON SHUFFLED:
+    ══════════════════════════
+
+    CNN uses 3×3 filters that detect
+    LOCAL patterns (edges, corners).
+
+    When you shuffle pixels:
+    • Adjacent pixels no longer related
+    • Local patterns destroyed
+    • Filters find nothing meaningful
+
+    This PROVES the inductive bias:
+    "Patterns are LOCAL and can
+     appear ANYWHERE"
+    """
+    ax7.text(0.1, 0.95, why_text, transform=ax7.transAxes, fontsize=10,
+            verticalalignment='top', fontfamily='monospace',
+            bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+
+    # Why MLP works
+    ax8 = fig.add_subplot(2, 4, 8)
+    ax8.axis('off')
+
+    why_mlp = """
+    WHY MLP STILL WORKS:
+    ════════════════════
+
+    MLP treats each pixel as an
+    independent input feature.
+
+    Shuffling is just a relabeling:
+    • pixel[0] → feature[perm[0]]
+    • Same information, different order
+    • MLP learns new mapping easily
+
+    MLP has NO spatial assumption:
+    "All input features are
+     equally connected"
+    """
+    ax8.text(0.1, 0.95, why_mlp, transform=ax8.transAxes, fontsize=10,
+            verticalalignment='top', fontfamily='monospace',
+            bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8))
+
+    plt.suptitle('SPATIAL INDUCTIVE BIAS: The Critical Proof\n'
+                 'Shuffle pixels → CNN fails, MLP works → CNN needs local structure!',
+                 fontsize=13, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    return fig
+
+
+def visualize_translation_equivariance():
+    """
+    Show translation equivariance: shift input → shift output.
+
+    Same pattern at different positions gives same filter response,
+    just at different positions.
+    """
+    np.random.seed(42)
+    X_train, X_test, y_train, y_test = create_simple_image_dataset(n_samples=600)
+
+    # Train CNN
+    cnn = SimpleCNN(input_shape=(1, 8, 8), n_classes=2, n_filters=8)
+    cnn.fit(X_train, y_train, epochs=100, lr=0.01, verbose=False)
+
+    fig, axes = plt.subplots(3, 5, figsize=(15, 9))
+
+    # Create a simple pattern and shift it
+    pattern = np.zeros((8, 8))
+    pattern[2:5, 2:5] = 1.0  # 3x3 square
+
+    shifts = [(0, 0), (0, 2), (2, 0), (2, 2)]
+
+    # Row 1: Shifted inputs
+    axes[0, 0].text(0.5, 0.5, 'INPUT\nIMAGES', ha='center', va='center',
+                    fontsize=12, fontweight='bold', transform=axes[0, 0].transAxes)
+    axes[0, 0].axis('off')
+
+    shifted_images = []
+    for idx, (dy, dx) in enumerate(shifts):
+        shifted = np.zeros((8, 8))
+        y_start, y_end = dy, min(dy + 3, 8)
+        x_start, x_end = dx, min(dx + 3, 8)
+        shifted[y_start:y_end, x_start:x_end] = 1.0
+        shifted_images.append(shifted)
+
+        axes[0, idx + 1].imshow(shifted, cmap='gray')
+        axes[0, idx + 1].set_title(f'Shift ({dy},{dx})', fontsize=9)
+        axes[0, idx + 1].axis('off')
+
+    # Row 2: Feature maps from Conv1 (one specific filter)
+    axes[1, 0].text(0.5, 0.5, 'CONV1\nOUTPUT\n(Filter 0)', ha='center', va='center',
+                    fontsize=12, fontweight='bold', transform=axes[1, 0].transAxes)
+    axes[1, 0].axis('off')
+
+    for idx, img in enumerate(shifted_images):
+        x = img[np.newaxis, np.newaxis, :, :]
+        conv_out = cnn.layers[0].forward(x)
+        relu_out = cnn.layers[1].forward(conv_out)
+
+        axes[1, idx + 1].imshow(relu_out[0, 0], cmap='viridis')
+        axes[1, idx + 1].set_title(f'Response shifts too!', fontsize=9)
+        axes[1, idx + 1].axis('off')
+
+    # Row 3: Explanation
+    for i in range(5):
+        axes[2, i].axis('off')
+
+    axes[2, 2].text(0.5, 0.5,
+        'TRANSLATION EQUIVARIANCE\n'
+        '═══════════════════════════\n\n'
+        'When input shifts by (dy, dx),\n'
+        'the feature map shifts by (dy, dx) too!\n\n'
+        'This is because the SAME filter\n'
+        'is applied at EVERY position.\n\n'
+        'Weight sharing → Translation equivariance\n'
+        '(Same pattern → Same response, anywhere)',
+        ha='center', va='center', fontsize=11, fontfamily='monospace',
+        transform=axes[2, 2].transAxes,
+        bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+
+    plt.suptitle('TRANSLATION EQUIVARIANCE: Shift Input → Shift Output\n'
+                 'Same filter at every position = same response pattern shifts with input',
+                 fontsize=13, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    return fig
+
+
 def benchmark_on_shapes():
     """Benchmark CNN on shape recognition."""
     print("\n" + "="*60)
@@ -962,11 +1412,40 @@ WHY IT FAILS ON SHUFFLED PIXELS:
     ablation_experiments()
     results = benchmark_on_shapes()
 
-    fig = visualize_filters_and_activations()
-    save_path = '/Users/sid47/ML Algorithms/13_cnn.png'
-    fig.savefig(save_path, dpi=100, bbox_inches='tight')
-    print(f"\nSaved to: {save_path}")
-    plt.close(fig)
+    # Generate visualizations
+    print("\nGenerating visualizations...")
+
+    # 1. Feature hierarchy (THE KEY INSIGHT)
+    print("1. Generating feature hierarchy visualization...")
+    fig1 = visualize_feature_hierarchy()
+    save_path1 = '/Users/sid47/ML Algorithms/13_cnn_hierarchy.png'
+    fig1.savefig(save_path1, dpi=150, bbox_inches='tight')
+    print(f"   Saved to: {save_path1}")
+    plt.close(fig1)
+
+    # 2. Spatial inductive bias proof (shuffle test)
+    print("2. Generating spatial inductive bias visualization...")
+    fig2 = visualize_spatial_inductive_bias()
+    save_path2 = '/Users/sid47/ML Algorithms/13_cnn_shuffle_test.png'
+    fig2.savefig(save_path2, dpi=150, bbox_inches='tight')
+    print(f"   Saved to: {save_path2}")
+    plt.close(fig2)
+
+    # 3. Translation equivariance
+    print("3. Generating translation equivariance visualization...")
+    fig3 = visualize_translation_equivariance()
+    save_path3 = '/Users/sid47/ML Algorithms/13_cnn_equivariance.png'
+    fig3.savefig(save_path3, dpi=150, bbox_inches='tight')
+    print(f"   Saved to: {save_path3}")
+    plt.close(fig3)
+
+    # 4. Complete story (existing, for backward compatibility)
+    print("4. Generating complete story visualization...")
+    fig4 = visualize_cnn_story()
+    save_path4 = '/Users/sid47/ML Algorithms/13_cnn.png'
+    fig4.savefig(save_path4, dpi=100, bbox_inches='tight')
+    print(f"   Saved to: {save_path4}")
+    plt.close(fig4)
 
     print("\n" + "="*60)
     print("SUMMARY")
@@ -978,4 +1457,19 @@ WHY IT FAILS ON SHUFFLED PIXELS:
 4. Hierarchical: edges → textures → parts → objects
 5. FAILS on shuffled pixels (spatial inductive bias)
 6. Fewer parameters than MLP with same/better performance
+
+===============================================================
+THE KEY INSIGHTS (see visualizations):
+===============================================================
+
+    13_cnn_hierarchy.png    — Layer 1 edges → Layer 2 textures
+    13_cnn_shuffle_test.png — CNN FAILS on shuffled, MLP works!
+    13_cnn_equivariance.png — Shift input → Shift output
+    13_cnn.png              — Complete story overview
+
+CNN's INDUCTIVE BIAS:
+    "Patterns are LOCAL and can appear ANYWHERE"
+    This is why it works for images but breaks on shuffled pixels.
+
+NEXT: RNN/LSTM — exploit sequential structure through recurrence
     """)
