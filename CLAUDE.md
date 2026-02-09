@@ -1529,6 +1529,135 @@ INDUCTIVE BIAS
 
 ---
 
+## EXPANSION: Conceptual Infrastructure (68-70)
+
+These three files fill foundational gaps — concepts used throughout the repo but never explained standalone. They complete the "understanding" layer that ties algorithms together.
+
+### 68_information_theory.py — Paradigm: UNCERTAINTY MEASUREMENT
+```
+===============================================================
+WHAT IT IS (THE CORE IDEA)
+===============================================================
+
+Quantifies uncertainty and information. Used everywhere in ML:
+- Cross-entropy loss in classification
+- KL divergence in t-SNE and VAE
+- Entropy in decision tree splits
+- Mutual information in feature selection
+
+KEY FUNCTIONS:
+    entropy(p)              — H(X) = -Σ p(x) log p(x)
+    cross_entropy(p, q)     — H(P,Q) = -Σ p(x) log q(x)
+    kl_divergence(p, q)     — KL(P||Q) = Σ p log(p/q) — asymmetric!
+    jsd(p, q)               — Jensen-Shannon — symmetric, bounded
+    mutual_information(pxy) — I(X;Y) from joint distribution
+
+===============================================================
+INDUCTIVE BIAS
+===============================================================
+
+1. DISCRETE distributions (continuous = differential entropy)
+2. 0 log 0 = 0 by convention
+3. KL is NOT a distance (asymmetric, no triangle inequality)
+4. JSD is symmetric, sqrt(JSD) is a proper metric
+5. High entropy ≠ useless (uniform prior = maximum ignorance)
+```
+
+**Ablations:**
+- Entropy vs number of classes (uniform = max = log K)
+- KL asymmetry: KL(P||Q) ≠ KL(Q||P)
+- Cross-entropy vs MSE: CE penalizes confident-wrong exponentially
+- Mutual information: independent (MI=0) vs correlated
+- JSD vs KL: symmetric, bounded [0, log 2]
+
+**Cross-references:** 60_tsne.py (KL objective), 18_vae.py (ELBO), 02_logistic_regression.py (CE loss), 07_decision_tree.py (entropy splits)
+
+---
+
+### 69_feature_engineering.py — Paradigm: DATA TRANSFORMATION
+```
+===============================================================
+WHAT IT IS (THE CORE IDEA)
+===============================================================
+
+80% of applied ML is data preparation. This file covers:
+1. SCALING: StandardScaler, MinMaxScaler, RobustScaler
+2. MISSING DATA: mean, median, indicator imputation
+3. ENCODING: one-hot vs ordinal
+4. FEATURE CREATION: polynomial features
+5. OUTLIER DETECTION: z-score, IQR methods
+
+THE CORE INSIGHT:
+    Algorithms see NUMBERS, not meaning.
+    If your numbers don't represent the right thing,
+    no algorithm can save you.
+
+===============================================================
+INDUCTIVE BIAS
+===============================================================
+
+1. Scaling assumes features should contribute equally
+2. Mean imputation assumes values are missing at random
+3. Polynomial features assume interactions matter (but explode in dimension)
+4. One-hot assumes no ordering between categories
+5. Outlier removal assumes extreme values are errors (not always true)
+```
+
+**Ablations:**
+- Scaling effect: KNN accuracy jumps with scaling; tree unchanged
+- Missing data: mean vs median vs indicator imputation
+- One-hot vs ordinal on tree vs KNN
+- Polynomial degree sweep: underfitting → overfitting
+- Outlier effect: linear regression shifts; tree robust
+
+**Cross-references:** 03_knn.py (distance-sensitive), 07_decision_tree.py (scale-invariant), 01_linear_regression.py (outlier-sensitive), 59_pca.py (scaling ablation)
+
+---
+
+### 70_lr_scheduling.py — Paradigm: DYNAMIC LEARNING RATES
+```
+===============================================================
+WHAT IT IS (THE CORE IDEA)
+===============================================================
+
+Learning rate should CHANGE during training:
+    Early: high lr → explore broadly
+    Late:  low lr  → fine-tune precisely
+
+Different from adaptive optimizers (64):
+    Adaptive: per-PARAMETER lr from gradient history
+    Scheduling: GLOBAL lr change over time (on top of adaptive)
+
+SCHEDULERS:
+    StepDecayScheduler        — lr *= factor every N steps
+    ExponentialDecayScheduler — lr = lr_0 * gamma^t
+    CosineAnnealingScheduler  — smooth cosine from lr_max → lr_min
+    WarmupScheduler           — linear ramp 0 → lr_max
+    CosineWarmRestartsScheduler — cosine + periodic resets (SGDR)
+    OneCycleScheduler         — warmup → peak → cosine cooldown
+
+===============================================================
+INDUCTIVE BIAS
+===============================================================
+
+1. Early = exploration, late = exploitation
+2. Smooth schedules > step functions
+3. Warmup prevents instability from random-weight gradients
+4. Restarts can escape shallow local minima
+```
+
+**Imports from:** 63_sgd_momentum.py (SGD, loss surfaces), 64_adaptive_optimizers.py (Adam, MLP)
+
+**Ablations:**
+- Fixed lr vs step decay vs cosine on Rosenbrock
+- Warmup effect at aggressive lr (stability)
+- Restart frequency and T_mult
+- All 6 schedulers comparison table
+
+**Cross-references:** 63_sgd_momentum.py (fixed lr baseline), 64_adaptive_optimizers.py (per-param adaptation), 12_mlp.py (where scheduling matters)
+
+---
+
 ## Implementation Checklist
 
 ### For each algorithm:
@@ -1564,6 +1693,9 @@ Examples:
 - `60_tsne.py` → `60_tsne_perplexity.png`, `60_tsne_evolution.png`, `60_tsne_vs_pca.png`
 - `63_sgd_momentum.py` → `63_sgd_trajectories.png`, `63_sgd_lr_sweep.png`, `63_sgd_momentum_physics.png`
 - `67_local_explanations.py` → `67_shap_waterfall.png`, `67_shap_summary.png`, `67_lime_local.png`
+- `68_information_theory.py` → `68_entropy_distributions.png`, `68_kl_asymmetry.png`, `68_mutual_information.png`
+- `69_feature_engineering.py` → `69_scaling_comparison.png`, `69_missing_data.png`, `69_polynomial_features.png`
+- `70_lr_scheduling.py` → `70_schedule_shapes.png`, `70_schedule_training.png`, `70_warmup_effect.png`
 
 ---
 
