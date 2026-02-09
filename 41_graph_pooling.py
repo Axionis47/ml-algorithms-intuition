@@ -1,106 +1,88 @@
 """
-Graph Pooling — Hierarchical Graph Representations
-===================================================
-
-Paradigm: COARSEN GRAPHS FOR GRAPH-LEVEL TASKS
+Graph Pooling — Paradigm: HIERARCHICAL GRAPHS
 
 ===============================================================
 WHAT IT IS (THE CORE IDEA)
 ===============================================================
 
-For GRAPH-LEVEL tasks (classify entire graph), we need to:
-1. Aggregate node features into a single graph representation
-2. Create HIERARCHICAL representations
+How to go from NODE representations to GRAPH representation?
 
-SIMPLE POOLING (Readout):
-    h_G = READOUT({h_v : v ∈ G})
+GNNs produce node embeddings H in R^(n x d).
+But for GRAPH CLASSIFICATION, we need ONE vector per graph.
 
-    Options:
-    - SUM: Σ_v h_v (captures size, sensitive to outliers)
-    - MEAN: (1/|V|) Σ_v h_v (size-invariant)
-    - MAX: max_v h_v (captures salient features)
-
-HIERARCHICAL POOLING:
-    Graph → Coarsen → Smaller Graph → ... → Final
-    "Build a pyramid of increasingly abstract representations"
+This file addresses: Given a set of graphs, each with a label,
+how do we classify entire graphs?
 
 ===============================================================
-WHY HIERARCHICAL?
+GLOBAL POOLING (Simple Approaches)
 ===============================================================
 
-1. MULTI-SCALE: Capture local AND global patterns
-2. EFFICIENCY: Reduce computation for large graphs
-3. INTERPRETABILITY: See what structures are preserved
+Given node embeddings H = [h_1, h_2, ..., h_n]:
 
-ANALOGY to CNNs:
-- CNN: Stride/Pooling reduces spatial resolution
-- Graph: Pooling reduces number of nodes
+1. SUM:  h_G = sum_v h_v
+   - Size-sensitive (larger graphs = larger vectors)
+   - Preserves total information
+   - Used in GIN (provably most expressive)
 
-===============================================================
-DIFFPOOL — Differentiable Pooling
-===============================================================
+2. MEAN: h_G = (1/n) * sum_v h_v
+   - Size-invariant (same scale regardless of graph size)
+   - Loses count information
+   - Good when graph size varies widely
 
-Learn SOFT cluster assignments end-to-end!
-
-S^(l) = softmax(GNN_pool(A, X))  (n × k assignment matrix)
-
-New features:  X^(l+1) = S^T X^(l)       (k × d)
-New adjacency: A^(l+1) = S^T A^(l) S     (k × k)
-
-WHERE:
-- S_ij = probability that node i belongs to cluster j
-- Each layer reduces n nodes to k clusters
-
-DIFFERENTIABLE: Gradients flow through soft assignments!
+3. MAX:  h_G = max_v h_v  (element-wise)
+   - Captures most salient feature per dimension
+   - Loses everything but the maximum
+   - Good for detecting specific motifs
 
 ===============================================================
-TOP-K POOLING — Select Top Nodes
+HIERARCHICAL POOLING
 ===============================================================
 
-Learn a SCORE for each node, keep top-k.
+Learn to COARSEN the graph:
+    Graph -> Cluster -> Smaller Graph -> ... -> Final embedding
 
-y = sigmoid(X p / ||p||)     (node scores)
-idx = top-k(y)               (select indices)
-X' = X[idx] ⊙ y[idx]         (gate by score)
+TopK Pooling:
+    1. Score each node: y = sigma(X @ p)
+    2. Keep top-k scored nodes: idx = top-k(y)
+    3. Gate features by score: X' = X[idx] * y[idx]
+    4. Create subgraph from selected nodes
 
-WHERE:
-- p is a learnable projection vector
-- Nodes with high scores are kept
-- Low-score nodes are dropped
-
-===============================================================
-SAGPOOL — Self-Attention Graph Pooling
-===============================================================
-
-Use GNN to compute attention scores:
-
-z = GNN(A, X)                (node representations)
-y = tanh(z @ W)              (attention scores)
-idx = top-k(y)               (select top-k nodes)
-X' = X[idx] ⊙ y[idx]
-
-More expressive than TopK (uses structure for scoring).
+DiffPool (Differential Pooling):
+    1. Learn soft cluster assignments: S = softmax(GNN(A, X))
+    2. Cluster features: X' = S^T @ X
+    3. Cluster adjacency: A' = S^T @ A @ S
+    4. End-to-end differentiable!
 
 ===============================================================
-GRAPH U-NET — Encode-Decode with Skip Connections
+WHEN TO USE WHAT
 ===============================================================
 
-Like image U-Net but for graphs:
+- Small graphs, simple task -> Global SUM/MEAN
+- Variable-size graphs -> Global MEAN
+- Need expressiveness -> Global SUM (GIN-style)
+- Multi-scale structure -> Hierarchical (TopK/DiffPool)
+- Large graphs -> Hierarchical (reduces computation)
 
-ENCODER: Pool → Reduce resolution
-DECODER: Unpool → Restore resolution
-SKIP: Connect encoder to decoder at each level
+===============================================================
+GRAPH CLASSIFICATION PIPELINE
+===============================================================
 
-Useful for node-level tasks with hierarchical context.
+The full pipeline:
+    1. Node features X
+    2. GNN layers: X -> H (node embeddings)
+    3. POOLING: H -> h_G (graph embedding)
+    4. MLP classifier: h_G -> class probabilities
 
 ===============================================================
 INDUCTIVE BIAS
 ===============================================================
 
-1. HIERARCHY: Graphs have multi-scale structure
-2. SOFT ASSIGNMENT: Nodes belong probabilistically to clusters
-3. LEARNED: Pooling is task-dependent
-4. PERMUTATION INVARIANCE: Output doesn't depend on node order
+1. PERMUTATION INVARIANCE: Pooling must not depend on node order
+   SUM, MEAN, MAX are all permutation invariant
+2. SIZE INVARIANCE: Should handle different graph sizes
+   MEAN is naturally size-invariant, SUM is not
+3. INFORMATION PRESERVATION: Don't lose too much
+   SUM > MEAN > MAX (in terms of information retained)
 
 ===============================================================
 """
@@ -109,493 +91,420 @@ import numpy as np
 import matplotlib.pyplot as plt
 import sys
 sys.path.insert(0, '/Users/sid47/ML Algorithms')
-
 from importlib import import_module
-graph_fund = import_module('35_graph_fundamentals')
-Graph = graph_fund.Graph
-karate_club = graph_fund.karate_club
-create_community_graph = graph_fund.create_community_graph
-spring_layout = graph_fund.spring_layout
+graph_module = import_module('35_graph_fundamentals')
+Graph = graph_module.Graph
+karate_club = graph_module.karate_club
+create_community_graph = graph_module.create_community_graph
+create_transductive_split = graph_module.create_transductive_split
+spring_layout = graph_module.spring_layout
+draw_graph = graph_module.draw_graph
 
+gcn_module = import_module('36_gcn')
+softmax = gcn_module.softmax
+cross_entropy_loss = gcn_module.cross_entropy_loss
+compute_normalized_adjacency = gcn_module.compute_normalized_adjacency
+
+
+# ============================================================
+# DATASET: Molecular-like graph classification
+# ============================================================
+
+def create_graph_classification_dataset(n_graphs=60, n_classes=3, random_state=42):
+    """
+    Create a dataset of small graphs for graph classification.
+
+    Three classes of graphs with different structural properties:
+    - Class 0: "Chain" graphs (path-like, linear)
+    - Class 1: "Ring" graphs (cycle-like, closed loops)
+    - Class 2: "Star" graphs (hub-and-spoke)
+
+    Returns: list of (Graph, label) pairs
+    """
+    rng = np.random.RandomState(random_state)
+    dataset = []
+
+    graphs_per_class = n_graphs // n_classes
+
+    for cls in range(n_classes):
+        for i in range(graphs_per_class):
+            if cls == 0:
+                # Chain graphs: 5-10 nodes in a path
+                n = rng.randint(5, 11)
+                g = Graph(n)
+                for j in range(n - 1):
+                    g.add_edge(j, j + 1)
+                # Add a few random edges for variety
+                for _ in range(rng.randint(0, 3)):
+                    a, b = rng.randint(0, n, size=2)
+                    if a != b:
+                        g.add_edge(a, b)
+
+            elif cls == 1:
+                # Ring graphs: 5-10 nodes in a cycle
+                n = rng.randint(5, 11)
+                g = Graph(n)
+                for j in range(n):
+                    g.add_edge(j, (j + 1) % n)
+                # Add cross-ring edges
+                for _ in range(rng.randint(0, 2)):
+                    a, b = rng.randint(0, n, size=2)
+                    if a != b and abs(a - b) > 1:
+                        g.add_edge(a, b)
+
+            else:
+                # Star graphs: 1 hub + 4-9 spokes
+                n_spokes = rng.randint(4, 10)
+                n = n_spokes + 1
+                g = Graph(n)
+                for j in range(1, n):
+                    g.add_edge(0, j)
+                # Add a few spoke-to-spoke edges
+                for _ in range(rng.randint(0, 3)):
+                    a = rng.randint(1, n)
+                    b = rng.randint(1, n)
+                    if a != b:
+                        g.add_edge(a, b)
+
+            # Node features based on structural properties
+            feat_dim = 8
+            X = np.zeros((n, feat_dim))
+            degs = g.degrees()
+            X[:, 0] = degs / max(np.max(degs), 1)  # normalized degree
+            X[:, 1] = 1.0 / (degs + 1)  # inverse degree
+            X[:, 2] = (degs == 1).astype(float)  # leaf indicator
+            X[:, 3] = (degs >= 3).astype(float)  # hub indicator
+            X[:, 4] = np.arange(n) / n  # position encoding
+            X[:, 5:] = rng.randn(n, feat_dim - 5) * 0.1  # noise
+            g.X = X
+
+            dataset.append((g, cls))
+
+    # Shuffle
+    indices = rng.permutation(len(dataset))
+    dataset = [dataset[i] for i in indices]
+
+    return dataset
+
+
+# ============================================================
+# GNN LAYER (shared by all pooling methods)
+# ============================================================
+
+class GNNLayer:
+    """Simple GCN-style layer for graph classification pipeline."""
+
+    def __init__(self, d_in, d_out, random_state=None):
+        rng = np.random.RandomState(random_state)
+        std = np.sqrt(2.0 / (d_in + d_out))
+        self.W = rng.randn(d_in, d_out) * std
+        self.b = np.zeros(d_out)
+        self.d_in = d_in
+        self.d_out = d_out
+
+    def forward(self, A_hat, H):
+        """H' = ReLU(A_hat @ H @ W + b)"""
+        Z = A_hat @ H @ self.W + self.b
+        H_out = np.maximum(Z, 0)
+        return H_out, Z
+
+
+# ============================================================
+# GLOBAL POOLING
+# ============================================================
 
 class GlobalPooling:
-    """
-    Simple global pooling (readout) operations.
+    """Global pooling: aggregate all node features into one graph vector."""
 
-    Aggregate all node features into graph feature.
-    """
+    def __init__(self, method='sum'):
+        """method: 'sum', 'mean', or 'max'"""
+        self.method = method
 
-    def __init__(self, pooling_type='mean'):
+    def forward(self, H):
         """
-        pooling_type: 'sum', 'mean', 'max', or 'attention'
+        H: (n_nodes, d) -> (d,) graph-level vector
         """
-        self.pooling_type = pooling_type
-
-        if pooling_type == 'attention':
-            # Learnable attention vector
-            self.attention = None
-
-    def forward(self, H, mask=None):
-        """
-        H: Node features (n × d)
-        mask: Optional node mask
-
-        Returns: Graph feature (d,)
-        """
-        if mask is not None:
-            H = H[mask]
-
-        if self.pooling_type == 'sum':
+        if self.method == 'sum':
+            return np.sum(H, axis=0)
+        elif self.method == 'mean':
+            return np.mean(H, axis=0)
+        elif self.method == 'max':
+            return np.max(H, axis=0)
+        else:
             return np.sum(H, axis=0)
 
-        elif self.pooling_type == 'mean':
-            return np.mean(H, axis=0)
+    def backward(self, dG, n_nodes, H=None):
+        """
+        Backprop through pooling.
+        dG: (d,) gradient from classifier
+        Returns: dH (n_nodes, d)
+        """
+        if self.method == 'sum':
+            return np.tile(dG, (n_nodes, 1))
+        elif self.method == 'mean':
+            return np.tile(dG / n_nodes, (n_nodes, 1))
+        elif self.method == 'max':
+            # Gradient flows to the max elements
+            dH = np.zeros_like(H)
+            max_idx = np.argmax(H, axis=0)
+            for d in range(H.shape[1]):
+                dH[max_idx[d], d] = dG[d]
+            return dH
+        return np.tile(dG, (n_nodes, 1))
 
-        elif self.pooling_type == 'max':
-            return np.max(H, axis=0)
 
-        elif self.pooling_type == 'attention':
-            # Learnable attention pooling
-            if self.attention is None or self.attention.shape[0] != H.shape[1]:
-                self.attention = np.random.randn(H.shape[1]) * 0.1
-
-            # Attention scores
-            scores = H @ self.attention
-            weights = np.exp(scores - np.max(scores))
-            weights = weights / (np.sum(weights) + 1e-10)
-
-            return np.sum(H * weights.reshape(-1, 1), axis=0)
-
+# ============================================================
+# TOP-K POOLING
+# ============================================================
 
 class TopKPooling:
     """
-    Top-K Graph Pooling.
+    TopK Pooling: select top-k scored nodes.
 
-    Select top-k nodes based on learned projection scores.
+    Score each node with a learnable projection,
+    keep the top-k, gate features by score.
     """
 
-    def __init__(self, in_features, ratio=0.5):
+    def __init__(self, d_in, ratio=0.5, random_state=None):
         """
-        in_features: Node feature dimension
-        ratio: Fraction of nodes to keep (0 < ratio ≤ 1)
+        d_in: feature dimension
+        ratio: fraction of nodes to keep
         """
-        self.in_features = in_features
+        rng = np.random.RandomState(random_state)
+        self.p = rng.randn(d_in) * 0.1  # scoring vector
         self.ratio = ratio
+        self.d_in = d_in
 
-        # Learnable projection for scoring
-        self.p = np.random.randn(in_features) * 0.1
-
-    def forward(self, adj, H):
+    def forward(self, H, A):
         """
-        adj: Adjacency matrix (n × n)
-        H: Node features (n × d)
+        H: (n, d) node features
+        A: (n, n) adjacency matrix
 
-        Returns: (new_adj, new_H, selected_indices, scores)
+        Returns: (H_pooled, A_pooled, idx, scores)
         """
         n = H.shape[0]
         k = max(1, int(n * self.ratio))
 
-        # Compute scores
-        scores = H @ self.p / (np.linalg.norm(self.p) + 1e-10)
-        scores = np.tanh(scores)  # Normalize to [-1, 1]
-
-        # Select top-k
-        idx = np.argsort(scores)[-k:]
-        idx = np.sort(idx)  # Keep original order
-
-        # Gate features by score
-        new_H = H[idx] * scores[idx].reshape(-1, 1)
-
-        # Subset adjacency
-        new_adj = adj[np.ix_(idx, idx)]
-
-        return new_adj, new_H, idx, scores
-
-
-class DiffPool:
-    """
-    Differentiable Pooling.
-
-    Learn soft cluster assignments using GNN.
-    """
-
-    def __init__(self, in_features, n_clusters, hidden_dim=32):
-        """
-        in_features: Input feature dimension
-        n_clusters: Number of clusters (output nodes)
-        """
-        self.in_features = in_features
-        self.n_clusters = n_clusters
-
-        # GNN for computing cluster assignments
-        scale = np.sqrt(2.0 / in_features)
-        self.W_assign = np.random.randn(in_features, hidden_dim) * scale
-        self.W_assign2 = np.random.randn(hidden_dim, n_clusters) * 0.1
-
-        # GNN for computing node embeddings
-        self.W_embed = np.random.randn(in_features, hidden_dim) * scale
-
-    def relu(self, x):
-        return np.maximum(0, x)
-
-    def forward(self, adj, H):
-        """
-        adj: Adjacency matrix (n × n)
-        H: Node features (n × d)
-
-        Returns: (new_adj, new_H, assignment_matrix)
-        """
-        # Add self-loops and normalize
-        adj_norm = adj + np.eye(adj.shape[0])
-        D = np.diag(1.0 / (np.sqrt(np.sum(adj_norm, axis=1)) + 1e-10))
-        adj_norm = D @ adj_norm @ D
-
-        # Compute cluster assignments: S = softmax(GNN(A, X))
-        Z_assign = adj_norm @ H @ self.W_assign
-        Z_assign = self.relu(Z_assign)
-        Z_assign = adj_norm @ Z_assign @ self.W_assign2
-
-        # Softmax over clusters
-        Z_max = np.max(Z_assign, axis=1, keepdims=True)
-        exp_Z = np.exp(Z_assign - Z_max)
-        S = exp_Z / (np.sum(exp_Z, axis=1, keepdims=True) + 1e-10)  # (n, k)
-
-        # Compute node embeddings
-        Z_embed = adj_norm @ H @ self.W_embed
-        Z_embed = self.relu(Z_embed)  # (n, hidden)
-
-        # Pool features: X' = S^T Z
-        new_H = S.T @ Z_embed  # (k, hidden)
-
-        # Pool adjacency: A' = S^T A S
-        new_adj = S.T @ adj @ S  # (k, k)
-
-        return new_adj, new_H, S
-
-
-class SAGPool:
-    """
-    Self-Attention Graph Pooling.
-
-    Use GNN to compute attention scores for node selection.
-    """
-
-    def __init__(self, in_features, ratio=0.5):
-        """
-        in_features: Node feature dimension
-        ratio: Fraction of nodes to keep
-        """
-        self.in_features = in_features
-        self.ratio = ratio
-
-        # GNN parameters for attention
-        scale = np.sqrt(2.0 / in_features)
-        self.W = np.random.randn(in_features, 1) * scale
-
-    def forward(self, adj, H):
-        """
-        adj: Adjacency matrix (n × n)
-        H: Node features (n × d)
-
-        Returns: (new_adj, new_H, selected_indices, scores)
-        """
-        n = H.shape[0]
-        k = max(1, int(n * self.ratio))
-
-        # Add self-loops and normalize
-        adj_norm = adj + np.eye(n)
-        D = np.diag(1.0 / (np.sqrt(np.sum(adj_norm, axis=1)) + 1e-10))
-        adj_norm = D @ adj_norm @ D
-
-        # GNN to compute attention scores
-        Z = adj_norm @ H @ self.W  # (n, 1)
-        scores = np.tanh(Z).squeeze()
+        # Score nodes
+        scores = H @ self.p  # (n,)
+        scores = np.tanh(scores)
 
         # Select top-k
         idx = np.argsort(scores)[-k:]
         idx = np.sort(idx)
 
         # Gate features by score
-        new_H = H[idx] * scores[idx].reshape(-1, 1)
+        H_pooled = H[idx] * scores[idx, None]
 
-        # Subset adjacency
-        new_adj = adj[np.ix_(idx, idx)]
+        # Create subgraph adjacency
+        A_pooled = A[np.ix_(idx, idx)]
 
-        return new_adj, new_H, idx, scores
+        return H_pooled, A_pooled, idx, scores
 
+
+# ============================================================
+# GRAPH CLASSIFIER (End-to-End)
+# ============================================================
 
 class GraphClassifier:
     """
-    Graph Classification model with pooling.
+    End-to-end graph classification:
+    GNN layers -> Pooling -> MLP classifier
 
-    GNN → Pool → GNN → Pool → ... → Readout → Classifier
+    Supports global pooling (sum/mean/max) and TopK pooling.
+    Full backpropagation for training.
     """
 
-    def __init__(self, n_features, hidden_dim, n_classes,
-                 pooling_type='diffpool', pool_ratio=0.5):
+    def __init__(self, n_features, n_hidden, n_classes, n_gnn_layers=2,
+                 pool_method='sum', pool_ratio=0.5, lr=0.01,
+                 dropout=0.3, random_state=None):
         self.n_features = n_features
-        self.hidden_dim = hidden_dim
+        self.n_hidden = n_hidden
         self.n_classes = n_classes
-        self.pooling_type = pooling_type
+        self.n_gnn_layers = n_gnn_layers
+        self.pool_method = pool_method
+        self.lr = lr
+        self.dropout = dropout
 
-        # First GNN layer
-        scale = np.sqrt(2.0 / n_features)
-        self.W1 = np.random.randn(n_features, hidden_dim) * scale
+        rng = np.random.RandomState(random_state)
 
-        # Pooling layer
-        if pooling_type == 'topk':
-            self.pool = TopKPooling(hidden_dim, ratio=pool_ratio)
-        elif pooling_type == 'sagpool':
-            self.pool = SAGPool(hidden_dim, ratio=pool_ratio)
-        elif pooling_type == 'diffpool':
-            self.pool = DiffPool(hidden_dim, n_clusters=max(2, int(10 * pool_ratio)))
-        else:
-            self.pool = None
-
-        # Second GNN layer
-        self.W2 = np.random.randn(hidden_dim, hidden_dim) * np.sqrt(2.0 / hidden_dim)
-
-        # Readout
-        self.readout = GlobalPooling('mean')
-
-        # Classifier
-        self.W_out = np.random.randn(hidden_dim, n_classes) * 0.1
-        self.b_out = np.zeros(n_classes)
-
-    def relu(self, x):
-        return np.maximum(0, x)
-
-    def forward(self, graph):
-        """Forward pass."""
-        adj = graph.adj
-        H = graph.X
-
-        # Add self-loops and normalize
-        adj_norm = adj + np.eye(adj.shape[0])
-        D = np.diag(1.0 / (np.sqrt(np.sum(adj_norm, axis=1)) + 1e-10))
-        adj_norm = D @ adj_norm @ D
-
-        # First GNN
-        H = self.relu(adj_norm @ H @ self.W1)
+        # GNN layers
+        self.gnn_layers = []
+        for l in range(n_gnn_layers):
+            d_in = n_features if l == 0 else n_hidden
+            layer = GNNLayer(d_in, n_hidden, random_state=rng.randint(10000))
+            self.gnn_layers.append(layer)
 
         # Pooling
-        if self.pool is not None:
-            if self.pooling_type == 'diffpool':
-                adj, H, S = self.pool.forward(adj, H)
+        if pool_method == 'topk':
+            self.pooling = TopKPooling(n_hidden, ratio=pool_ratio,
+                                       random_state=rng.randint(10000))
+        else:
+            self.pooling = GlobalPooling(method=pool_method)
+
+        # Classifier MLP: graph_embedding -> classes
+        readout_dim = n_hidden * n_gnn_layers  # concat all layer outputs
+        std = np.sqrt(2.0 / (readout_dim + n_hidden))
+        self.W_mlp1 = rng.randn(readout_dim, n_hidden) * std
+        self.b_mlp1 = np.zeros(n_hidden)
+        std2 = np.sqrt(2.0 / (n_hidden + n_classes))
+        self.W_mlp2 = rng.randn(n_hidden, n_classes) * std2
+        self.b_mlp2 = np.zeros(n_classes)
+
+    def forward_single(self, graph, training=True):
+        """Forward pass for a single graph. Returns: (probs, cache)"""
+        A = graph.A.astype(float)
+        A_hat = compute_normalized_adjacency(A)
+        H = graph.X.copy()
+
+        cache = {
+            'H_layers': [H.copy()],
+            'Z_layers': [],
+            'A_hat': A_hat,
+        }
+
+        all_H = []
+        for l, layer in enumerate(self.gnn_layers):
+            H_out, Z = layer.forward(A_hat, H)
+            if training and self.dropout > 0:
+                mask = (np.random.rand(*H_out.shape) > self.dropout).astype(float)
+                H_out = H_out * mask / (1 - self.dropout + 1e-10)
+            cache['H_layers'].append(H_out.copy())
+            cache['Z_layers'].append(Z.copy())
+            all_H.append(H_out.copy())
+            H = H_out
+
+        # Graph-level readout: concatenate pooled embeddings from all layers
+        if self.pool_method == 'topk':
+            H_pooled, A_pooled, idx, scores = self.pooling.forward(H, A)
+            graph_embedding = np.sum(H_pooled, axis=0)
+            graph_embedding = np.tile(graph_embedding, self.n_gnn_layers)[:self.n_hidden * self.n_gnn_layers]
+            cache['topk'] = (idx, scores, H)
+        else:
+            pooled_layers = []
+            for layer_H in all_H:
+                pooled_layers.append(self.pooling.forward(layer_H))
+            graph_embedding = np.concatenate(pooled_layers)
+
+        cache['graph_embedding'] = graph_embedding
+        cache['all_H'] = all_H
+
+        # MLP classifier
+        z1 = graph_embedding @ self.W_mlp1 + self.b_mlp1
+        h1 = np.maximum(z1, 0)
+        z2 = h1 @ self.W_mlp2 + self.b_mlp2
+
+        exp_z = np.exp(z2 - np.max(z2))
+        probs = exp_z / (np.sum(exp_z) + 1e-10)
+
+        cache['z1'] = z1
+        cache['h1'] = h1
+        cache['z2'] = z2
+        cache['probs'] = probs
+
+        return probs, cache
+
+    def backward_single(self, label, cache):
+        """Backprop through a single graph."""
+        probs = cache['probs']
+
+        # Cross-entropy + softmax gradient
+        dZ2 = probs.copy()
+        dZ2[label] -= 1
+
+        h1 = cache['h1']
+        gW2 = np.outer(h1, dZ2)
+        gb2 = dZ2
+
+        dH1 = dZ2 @ self.W_mlp2.T
+        dZ1 = dH1 * (cache['z1'] > 0).astype(float)
+
+        graph_emb = cache['graph_embedding']
+        gW1 = np.outer(graph_emb, dZ1)
+        gb1 = dZ1
+
+        dGraphEmb = dZ1 @ self.W_mlp1.T
+
+        # Split gradient back to per-layer pooled embeddings
+        all_H = cache['all_H']
+        dH_per_layer = []
+        offset = 0
+        for layer_H in all_H:
+            d = layer_H.shape[1]
+            dPooled = dGraphEmb[offset:offset + d]
+            dH = self.pooling.backward(dPooled, layer_H.shape[0], layer_H)
+            dH_per_layer.append(dH)
+            offset += d
+
+        # Backprop through GNN layers
+        A_hat = cache['A_hat']
+        for l in range(self.n_gnn_layers - 1, -1, -1):
+            dH = dH_per_layer[l]
+            Z = cache['Z_layers'][l]
+            H_prev = cache['H_layers'][l]
+
+            dZ = dH * (Z > 0).astype(float)
+            AH = A_hat @ H_prev
+            gW = AH.T @ dZ
+            gb = np.sum(dZ, axis=0)
+
+            self.gnn_layers[l].W -= self.lr * gW
+            self.gnn_layers[l].b -= self.lr * gb
+
+        self.W_mlp2 -= self.lr * gW2
+        self.b_mlp2 -= self.lr * gb2
+        self.W_mlp1 -= self.lr * gW1
+        self.b_mlp1 -= self.lr * gb1
+
+    def fit(self, dataset, n_epochs=100, train_ratio=0.8, verbose=True):
+        """Train on a dataset of (Graph, label) pairs."""
+        n = len(dataset)
+        n_train = int(n * train_ratio)
+        train_data = dataset[:n_train]
+        val_data = dataset[n_train:]
+
+        loss_history = []
+        train_accs = []
+        val_accs = []
+
+        for epoch in range(n_epochs):
+            idx = np.random.permutation(len(train_data))
+            epoch_loss = 0.0
+            correct = 0
+
+            for i in idx:
+                graph, label = train_data[i]
+                probs, cache = self.forward_single(graph, training=True)
+                loss = -np.log(probs[label] + 1e-10)
+                epoch_loss += loss
+                if np.argmax(probs) == label:
+                    correct += 1
+                self.backward_single(label, cache)
+
+            epoch_loss /= len(train_data)
+            train_acc = correct / len(train_data)
+            loss_history.append(epoch_loss)
+            train_accs.append(train_acc)
+
+            if len(val_data) > 0:
+                val_correct = sum(1 for g, l in val_data
+                                  if np.argmax(self.forward_single(g, False)[0]) == l)
+                val_acc = val_correct / len(val_data)
             else:
-                adj, H, idx, scores = self.pool.forward(adj, H)
+                val_acc = 0.0
+            val_accs.append(val_acc)
 
-            # Renormalize
-            if adj.shape[0] > 0:
-                adj_norm = adj + np.eye(adj.shape[0])
-                D = np.diag(1.0 / (np.sqrt(np.sum(adj_norm, axis=1)) + 1e-10))
-                adj_norm = D @ adj_norm @ D
-            else:
-                adj_norm = adj
+            if verbose and (epoch + 1) % 20 == 0:
+                print(f"  Epoch {epoch+1:>4}: loss={epoch_loss:.4f}, "
+                      f"train_acc={train_acc:.3f}, val_acc={val_acc:.3f}")
 
-        # Second GNN
-        if H.shape[0] > 0:
-            H = self.relu(adj_norm @ H @ self.W2)
+        return loss_history, train_accs, val_accs
 
-        # Readout
-        h_graph = self.readout.forward(H)
-
-        # Classifier
-        logits = h_graph @ self.W_out + self.b_out
-
-        # Softmax
-        logits_max = np.max(logits)
-        exp_logits = np.exp(logits - logits_max)
-        probs = exp_logits / (np.sum(exp_logits) + 1e-10)
-
-        return probs
-
-
-# ============================================================
-# VISUALIZATION
-# ============================================================
-
-def visualize_graph_pooling():
-    """
-    Comprehensive graph pooling visualization:
-    1. Global pooling comparison
-    2. TopK pooling
-    3. DiffPool clusters
-    4. SAGPool attention
-    5. Hierarchical pooling
-    6. Summary
-    """
-    print("\n" + "="*60)
-    print("GRAPH POOLING VISUALIZATION")
-    print("="*60)
-
-    fig = plt.figure(figsize=(16, 12))
-    np.random.seed(42)
-
-    graph, labels = karate_club()
-    graph.X = np.random.randn(graph.n_nodes, 16)
-
-    # ============ Plot 1: Global Pooling Comparison ============
-    ax1 = fig.add_subplot(2, 3, 1)
-
-    pooling_types = ['sum', 'mean', 'max']
-    H = graph.X
-
-    features = []
-    for ptype in pooling_types:
-        pool = GlobalPooling(ptype)
-        h_g = pool.forward(H)
-        features.append(np.mean(np.abs(h_g)))  # Average absolute value
-
-    x = np.arange(len(pooling_types))
-    ax1.bar(x, features, color=['steelblue', 'coral', 'mediumseagreen'])
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(['SUM\n(size-sensitive)', 'MEAN\n(size-invariant)', 'MAX\n(salient)'])
-    ax1.set_ylabel('Avg |Feature Value|')
-    ax1.set_title('Global Pooling Methods\nDifferent aggregation semantics')
-
-    # ============ Plot 2: TopK Pooling ============
-    ax2 = fig.add_subplot(2, 3, 2)
-
-    topk = TopKPooling(in_features=16, ratio=0.5)
-    new_adj, new_H, idx, scores = topk.forward(graph.adj, graph.X)
-
-    pos = spring_layout(graph)
-
-    # Draw all edges faintly
-    for i, j in graph.get_edge_list():
-        ax2.plot([pos[i, 0], pos[j, 0]], [pos[i, 1], pos[j, 1]],
-                'k-', alpha=0.1, linewidth=0.5)
-
-    # Draw nodes with score-based colors
-    scatter = ax2.scatter(pos[:, 0], pos[:, 1], c=scores, cmap='RdYlGn',
-                         s=100, edgecolors='black')
-    plt.colorbar(scatter, ax=ax2, label='Score')
-
-    # Highlight selected nodes
-    ax2.scatter(pos[idx, 0], pos[idx, 1], c='none', s=200,
-               edgecolors='blue', linewidths=2)
-
-    ax2.set_title(f'TopK Pooling (ratio=0.5)\nBlue circles = selected nodes')
-    ax2.axis('off')
-
-    # ============ Plot 3: DiffPool Clusters ============
-    ax3 = fig.add_subplot(2, 3, 3)
-
-    diffpool = DiffPool(in_features=16, n_clusters=4, hidden_dim=16)
-    new_adj, new_H, S = diffpool.forward(graph.adj, graph.X)
-
-    # Color nodes by cluster assignment
-    cluster_assign = np.argmax(S, axis=1)
-    colors = plt.cm.Set1(cluster_assign / max(cluster_assign.max(), 1))
-
-    for i, j in graph.get_edge_list():
-        ax3.plot([pos[i, 0], pos[j, 0]], [pos[i, 1], pos[j, 1]],
-                'k-', alpha=0.1, linewidth=0.5)
-
-    ax3.scatter(pos[:, 0], pos[:, 1], c=colors, s=100, edgecolors='black')
-
-    ax3.set_title(f'DiffPool Clusters (k={4})\nSoft cluster assignments')
-    ax3.axis('off')
-
-    # ============ Plot 4: SAGPool Attention ============
-    ax4 = fig.add_subplot(2, 3, 4)
-
-    sagpool = SAGPool(in_features=16, ratio=0.5)
-    new_adj, new_H, idx, scores = sagpool.forward(graph.adj, graph.X)
-
-    for i, j in graph.get_edge_list():
-        ax4.plot([pos[i, 0], pos[j, 0]], [pos[i, 1], pos[j, 1]],
-                'k-', alpha=0.1, linewidth=0.5)
-
-    scatter = ax4.scatter(pos[:, 0], pos[:, 1], c=scores, cmap='viridis',
-                         s=100, edgecolors='black')
-    plt.colorbar(scatter, ax=ax4, label='Attention Score')
-
-    ax4.scatter(pos[idx, 0], pos[idx, 1], c='none', s=200,
-               edgecolors='red', linewidths=2)
-
-    ax4.set_title('SAGPool (GNN-based attention)\nRed circles = selected nodes')
-    ax4.axis('off')
-
-    # ============ Plot 5: Hierarchical Visualization ============
-    ax5 = fig.add_subplot(2, 3, 5)
-
-    # Show pooling hierarchy
-    levels = []
-
-    # Level 0: original
-    levels.append(('Original', graph.n_nodes, graph.X.shape))
-
-    # Level 1: TopK pool
-    adj1, H1, _, _ = TopKPooling(16, ratio=0.5).forward(graph.adj, graph.X)
-    levels.append(('After TopK', adj1.shape[0], H1.shape))
-
-    # Level 2: Another TopK
-    if adj1.shape[0] > 1:
-        adj2, H2, _, _ = TopKPooling(H1.shape[1], ratio=0.5).forward(adj1, H1)
-        levels.append(('After 2nd TopK', adj2.shape[0], H2.shape))
-
-    y_positions = np.arange(len(levels))
-    sizes = [l[1] for l in levels]
-
-    ax5.barh(y_positions, sizes, color='steelblue', edgecolor='black')
-    ax5.set_yticks(y_positions)
-    ax5.set_yticklabels([l[0] for l in levels])
-    ax5.set_xlabel('Number of Nodes')
-    ax5.set_title('Hierarchical Pooling\nProgressively coarsen graph')
-
-    for i, (name, n_nodes, shape) in enumerate(levels):
-        ax5.text(n_nodes + 0.5, i, f'({n_nodes} nodes)', va='center')
-
-    # ============ Plot 6: Summary ============
-    ax6 = fig.add_subplot(2, 3, 6)
-    ax6.axis('off')
-
-    summary = """
-    Graph Pooling
-    ══════════════════════════════
-
-    THE KEY IDEA:
-    Aggregate nodes for graph-level tasks!
-
-    GLOBAL POOLING (Readout):
-    h_G = AGG({h_v : v ∈ G})
-
-    ┌────────────────────────────┐
-    │ SUM: Size-sensitive        │
-    │ MEAN: Size-invariant       │
-    │ MAX: Salient features      │
-    └────────────────────────────┘
-
-    HIERARCHICAL POOLING:
-    ┌────────────────────────────┐
-    │ TopK: Select high-score    │
-    │       nodes (projection)   │
-    ├────────────────────────────┤
-    │ DiffPool: Learn soft       │
-    │          cluster assign    │
-    ├────────────────────────────┤
-    │ SAGPool: GNN-based         │
-    │         attention scores   │
-    └────────────────────────────┘
-
-    BENEFITS:
-    ✓ Multi-scale representation
-    ✓ Learnable/adaptive
-    ✓ End-to-end differentiable
-    """
-
-    ax6.text(0.05, 0.95, summary, transform=ax6.transAxes, fontsize=10,
-             verticalalignment='top', fontfamily='monospace',
-             bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.3))
-
-    plt.suptitle('Graph Pooling — Hierarchical Graph Representations\n'
-                 'Coarsen graphs for graph-level tasks',
-                 fontsize=14, fontweight='bold')
-    plt.tight_layout()
-
-    return fig
+    def evaluate(self, dataset):
+        """Evaluate accuracy on a dataset."""
+        correct = sum(1 for g, l in dataset
+                      if np.argmax(self.forward_single(g, False)[0]) == l)
+        return correct / len(dataset)
 
 
 # ============================================================
@@ -603,70 +512,251 @@ def visualize_graph_pooling():
 # ============================================================
 
 def ablation_experiments():
-    """Run ablation experiments for graph pooling."""
-
     print("\n" + "="*60)
     print("ABLATION EXPERIMENTS")
     print("="*60)
 
     np.random.seed(42)
+    dataset = create_graph_classification_dataset(60, 3, random_state=42)
+    n_features = dataset[0][0].X.shape[1]
+    n_classes = 3
 
-    # 1. Global pooling type
-    print("\n1. GLOBAL POOLING TYPES")
+    # -------- Experiment 1: Pooling method comparison --------
+    print("\n1. POOLING METHOD COMPARISON")
     print("-" * 40)
 
-    for ptype in ['sum', 'mean', 'max', 'attention']:
-        results = []
-        for _ in range(5):
-            graph, labels = karate_club()
-            graph.X = np.random.randn(graph.n_nodes, 16)
+    pool_results = {}
+    for pool in ['sum', 'mean', 'max']:
+        accs = []
+        for trial in range(3):
+            model = GraphClassifier(
+                n_features, 16, n_classes, n_gnn_layers=2,
+                pool_method=pool, lr=0.005, dropout=0.2,
+                random_state=42 + trial
+            )
+            _, _, va = model.fit(dataset, n_epochs=80, train_ratio=0.8, verbose=False)
+            accs.append(va[-1] if va else 0.0)
+        mean_acc = np.mean(accs)
+        pool_results[pool] = mean_acc
+        print(f"  {pool:<6}  val_acc={mean_acc:.3f} +/- {np.std(accs):.3f}")
 
-            pool = GlobalPooling(ptype)
-            h_g = pool.forward(graph.X)
-            results.append(np.linalg.norm(h_g))
+    print("-> SUM: preserves count info (best for distinguishing structures)")
+    print("-> MEAN: size-invariant (good when graph sizes vary)")
+    print("-> MAX: captures salient features only")
 
-        print(f"{ptype:<12}  norm={np.mean(results):.3f} ± {np.std(results):.3f}")
-
-    print("→ SUM captures more information but is scale-dependent")
-
-    # 2. Pool ratio effect
-    print("\n2. POOL RATIO EFFECT (TopK)")
+    # -------- Experiment 2: Number of GNN layers --------
+    print("\n2. NUMBER OF GNN LAYERS")
     print("-" * 40)
 
-    for ratio in [0.25, 0.5, 0.75, 1.0]:
-        results = []
-        for _ in range(5):
-            graph, labels = karate_club()
-            graph.X = np.random.randn(graph.n_nodes, 16)
+    for n_layers in [1, 2, 3, 4]:
+        model = GraphClassifier(
+            n_features, 16, n_classes, n_gnn_layers=n_layers,
+            pool_method='sum', lr=0.005, dropout=0.2, random_state=42
+        )
+        _, _, va = model.fit(dataset, n_epochs=80, train_ratio=0.8, verbose=False)
+        print(f"  layers={n_layers}  val_acc={va[-1]:.3f}")
 
-            topk = TopKPooling(16, ratio=ratio)
-            new_adj, new_H, idx, scores = topk.forward(graph.adj, graph.X)
-            results.append(new_adj.shape[0])
+    print("-> 2-3 layers captures enough structure for small graphs")
 
-        print(f"ratio={ratio:.2f}  kept_nodes={np.mean(results):.1f}")
-
-    print("→ Trade-off: more nodes = more info, fewer = more abstract")
-
-    # 3. DiffPool clusters
-    print("\n3. DIFFPOOL NUMBER OF CLUSTERS")
+    # -------- Experiment 3: Hidden dimension --------
+    print("\n3. HIDDEN DIMENSION")
     print("-" * 40)
 
-    for n_clusters in [2, 4, 8, 16]:
-        results = []
-        for _ in range(5):
-            graph, labels = karate_club()
-            graph.X = np.random.randn(graph.n_nodes, 16)
+    for n_hidden in [8, 16, 32, 64]:
+        model = GraphClassifier(
+            n_features, n_hidden, n_classes, n_gnn_layers=2,
+            pool_method='sum', lr=0.005, dropout=0.2, random_state=42
+        )
+        _, _, va = model.fit(dataset, n_epochs=80, train_ratio=0.8, verbose=False)
+        print(f"  hidden={n_hidden:<4}  val_acc={va[-1]:.3f}")
 
-            diffpool = DiffPool(16, n_clusters=n_clusters, hidden_dim=16)
-            new_adj, new_H, S = diffpool.forward(graph.adj, graph.X)
+    print("-> 16-32 sufficient for simple structure recognition")
 
-            # Measure cluster quality (entropy of assignments)
-            entropy = -np.mean(np.sum(S * np.log(S + 1e-10), axis=1))
-            results.append(entropy)
+    return pool_results
 
-        print(f"k={n_clusters:<3}  assignment_entropy={np.mean(results):.3f}")
 
-    print("→ More clusters = more specific assignments")
+# ============================================================
+# BENCHMARK
+# ============================================================
+
+def benchmark_on_datasets():
+    print("\n" + "="*60)
+    print("BENCHMARK: Graph Classification")
+    print("="*60)
+
+    results = {}
+    for n_graphs, label in [(60, 'small_60'), (120, 'medium_120')]:
+        dataset = create_graph_classification_dataset(n_graphs, 3, random_state=42)
+        n_features = dataset[0][0].X.shape[1]
+
+        model = GraphClassifier(
+            n_features, 16, 3, n_gnn_layers=2,
+            pool_method='sum', lr=0.005, dropout=0.2, random_state=42
+        )
+        losses, ta, va = model.fit(dataset, n_epochs=100, train_ratio=0.8, verbose=False)
+        results[label] = {'train_acc': ta[-1], 'val_acc': va[-1]}
+        print(f"\n{label}: train_acc={ta[-1]:.3f}, val_acc={va[-1]:.3f}")
+
+    return results
+
+
+# ============================================================
+# VISUALIZATIONS
+# ============================================================
+
+def visualize_pooling():
+    print("\nGenerating: Graph pooling visualization...")
+
+    fig, axes = plt.subplots(2, 3, figsize=(16, 10))
+    np.random.seed(42)
+
+    dataset = create_graph_classification_dataset(60, 3, random_state=42)
+    n_features = dataset[0][0].X.shape[1]
+    n_classes = 3
+
+    # Panel 1: Example graphs from each class
+    ax = axes[0, 0]
+    class_names = ['Chain', 'Ring', 'Star']
+    class_colors = ['#e74c3c', '#3498db', '#2ecc71']
+
+    examples = {}
+    for g, label in dataset:
+        if label not in examples:
+            examples[label] = g
+        if len(examples) == n_classes:
+            break
+
+    for cls in range(n_classes):
+        g = examples[cls]
+        pos = spring_layout(g, seed=cls * 10 + 1)
+        offset_x = cls * 3.0
+        pos[:, 0] += offset_x
+        pos[:, 1] *= 0.8
+
+        for i, j in g.edge_list:
+            if i < j:
+                ax.plot([pos[i, 0], pos[j, 0]], [pos[i, 1], pos[j, 1]],
+                       color=class_colors[cls], alpha=0.5, linewidth=1)
+        ax.scatter(pos[:, 0], pos[:, 1], c=class_colors[cls], s=50,
+                  edgecolors='black', linewidths=0.5, zorder=3)
+        ax.text(offset_x + 0.5, -1.5, class_names[cls],
+               ha='center', fontsize=10, fontweight='bold',
+               color=class_colors[cls])
+
+    ax.set_title('Three Graph Classes\nChain / Ring / Star')
+    ax.set_aspect('equal')
+    ax.axis('off')
+
+    # Panel 2: Pooling comparison
+    ax = axes[0, 1]
+    pool_accs = {}
+    for pool in ['sum', 'mean', 'max']:
+        model = GraphClassifier(
+            n_features, 16, n_classes, n_gnn_layers=2,
+            pool_method=pool, lr=0.005, dropout=0.2, random_state=42
+        )
+        _, _, va = model.fit(dataset, n_epochs=80, train_ratio=0.8, verbose=False)
+        pool_accs[pool] = va[-1] if va else 0.0
+
+    colors = ['#2ecc71', '#3498db', '#e74c3c']
+    bars = ax.bar(pool_accs.keys(), pool_accs.values(), color=colors,
+                  edgecolor='black', linewidth=0.5)
+    for bar, acc in zip(bars, pool_accs.values()):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+               f'{acc:.3f}', ha='center', fontsize=10)
+    ax.set_ylabel('Validation Accuracy')
+    ax.set_title('Global Pooling Comparison\nSUM vs MEAN vs MAX')
+    ax.set_ylim(0, 1.1)
+    ax.grid(True, alpha=0.3, axis='y')
+
+    # Panel 3: Training curve
+    ax = axes[0, 2]
+    model = GraphClassifier(
+        n_features, 16, n_classes, n_gnn_layers=2,
+        pool_method='sum', lr=0.005, dropout=0.2, random_state=42
+    )
+    losses, ta, va = model.fit(dataset, n_epochs=100, train_ratio=0.8, verbose=False)
+    ax.plot(losses, 'b-', linewidth=1, alpha=0.7, label='Loss')
+    ax2 = ax.twinx()
+    ax2.plot(ta, 'g-', linewidth=1, alpha=0.7, label='Train')
+    ax2.plot(va, 'r-', linewidth=1, alpha=0.7, label='Val')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Loss', color='blue')
+    ax2.set_ylabel('Accuracy', color='red')
+    ax.set_title('Training Curve\n(SUM pooling)')
+    ax2.legend(loc='center right', fontsize=8)
+
+    # Panel 4: Pipeline diagram
+    ax = axes[1, 0]
+    ax.axis('off')
+    diagram = (
+        "GRAPH CLASSIFICATION PIPELINE\n"
+        "-------------------------------\n\n"
+        "  Input Graph\n"
+        "      |\n"
+        "  GNN Layer 1: H = s(A_hat X W_1)\n"
+        "      |            \\\n"
+        "  GNN Layer 2: H = s(A_hat H W_2)\n"
+        "      |              \\\n"
+        "  POOL: sum/mean/max  POOL\n"
+        "      |                |\n"
+        "  CONCAT readouts from all layers\n"
+        "      |\n"
+        "  MLP: [h_G] -> classes\n"
+        "      |\n"
+        "  softmax -> prediction"
+    )
+    ax.text(0.05, 0.5, diagram, fontsize=10, fontfamily='monospace',
+           va='center', ha='left',
+           bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+    ax.set_title('Pipeline Overview')
+
+    # Panel 5: Graph size distribution
+    ax = axes[1, 1]
+    sizes = [g.n_nodes for g, _ in dataset]
+    labels_data = [l for _, l in dataset]
+    for cls in range(n_classes):
+        cls_sizes = [s for s, l in zip(sizes, labels_data) if l == cls]
+        ax.hist(cls_sizes, bins=range(4, 13), alpha=0.5,
+               label=class_names[cls], color=class_colors[cls])
+    ax.set_xlabel('Number of Nodes')
+    ax.set_ylabel('Count')
+    ax.set_title('Graph Size Distribution\nby Class')
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+    # Panel 6: Summary
+    ax = axes[1, 2]
+    ax.axis('off')
+    summary = (
+        "GRAPH POOLING SUMMARY\n"
+        "------------------------\n\n"
+        "GLOBAL POOLING:\n"
+        "  SUM:  Preserves total info\n"
+        "        Size-sensitive\n"
+        "  MEAN: Size-invariant\n"
+        "        Loses count info\n"
+        "  MAX:  Captures salient features\n"
+        "        Loses all but max\n\n"
+        "MULTI-LAYER READOUT:\n"
+        "  Concatenate pooled embeddings\n"
+        "  from ALL GNN layers.\n"
+        "  Each layer captures different\n"
+        "  structural information.\n\n"
+        "KEY INSIGHT:\n"
+        "  SUM pooling + GIN layers\n"
+        "  = maximally expressive\n"
+        "  graph classification."
+    )
+    ax.text(0.05, 0.5, summary, fontsize=10, fontfamily='monospace',
+           va='center', ha='left',
+           bbox=dict(boxstyle='round', facecolor='lightcyan', alpha=0.5))
+
+    plt.suptitle('Graph Pooling: From Node Embeddings to Graph Classification\n'
+                 'GNN + Pooling + MLP = End-to-End Graph Classifier',
+                 fontsize=13, fontweight='bold')
+    plt.tight_layout()
+    return fig
 
 
 # ============================================================
@@ -675,30 +765,69 @@ def ablation_experiments():
 
 if __name__ == '__main__':
     print("="*60)
-    print("Graph Pooling — Hierarchical Graph Representations")
+    print("Graph Pooling -- Paradigm: HIERARCHICAL GRAPHS")
     print("="*60)
 
-    print(__doc__)
+    print("""
+WHAT THIS MODULE IS:
+    Going from NODE embeddings to GRAPH embeddings.
 
-    # Run experiments
-    ablation_experiments()
+    The full pipeline for graph classification:
+        1. GNN layers: node features -> node embeddings
+        2. POOLING: node embeddings -> graph embedding
+        3. MLP: graph embedding -> class prediction
 
-    # Create visualization
-    fig = visualize_graph_pooling()
+    GLOBAL POOLING:
+        SUM:  h_G = sum(h_v)        -- size-sensitive, preserves info
+        MEAN: h_G = mean(h_v)       -- size-invariant
+        MAX:  h_G = max(h_v)        -- captures salient features
+
+    GIN-STYLE READOUT:
+        Concatenate pooled embeddings from ALL GNN layers.
+        Each layer captures different structural info.
+        h_G = CONCAT(POOL(H^1), POOL(H^2), ..., POOL(H^K))
+
+KEY INSIGHT:
+    The choice of pooling determines what graph-level info is preserved.
+    SUM > MEAN > MAX in terms of information (like aggregation in GIN).
+    """)
+
+    pool_results = ablation_experiments()
+    results = benchmark_on_datasets()
+
+    print("\nGenerating visualizations...")
+
+    fig = visualize_pooling()
     save_path = '/Users/sid47/ML Algorithms/41_graph_pooling.png'
     fig.savefig(save_path, dpi=100, bbox_inches='tight')
-    print(f"\nSaved visualization to: {save_path}")
+    print(f"Saved: {save_path}")
     plt.close(fig)
 
     print("\n" + "="*60)
-    print("SUMMARY")
+    print("SUMMARY: What Graph Pooling Reveals")
     print("="*60)
     print("""
-1. Graph Pooling: Aggregate node features for graph-level tasks
-2. Global Pooling: SUM, MEAN, MAX, ATTENTION
-3. TopK: Select top-scoring nodes by learned projection
-4. DiffPool: Learn soft cluster assignments (differentiable)
-5. SAGPool: Use GNN for attention-based node selection
-6. Hierarchical: Multi-level coarsening for multi-scale
-7. All are differentiable → end-to-end training
+1. POOLING = NODE-TO-GRAPH AGGREGATION
+   Just like message passing aggregates neighbors to nodes,
+   pooling aggregates nodes to graphs.
+
+2. SUM PRESERVES THE MOST
+   SUM pooling + SUM aggregation (GIN) =
+   maximally expressive graph classification.
+
+3. MULTI-LAYER READOUT IS KEY
+   Concatenating pooled embeddings from ALL layers
+   captures multi-scale structural information.
+
+4. GRAPH CLASSIFICATION = DIFFERENT PARADIGM
+   Each graph is a SAMPLE (like an image in CNN).
+   Standard train/test split on the set of graphs.
+
+CONNECTION TO OTHER FILES:
+    36_gcn.py: Node-level GNN (provides the layers)
+    39_gin.py: Most expressive node aggregation (SUM)
+    40_mpnn.py: Unified message passing framework
+    42_hetero_gnn.py: Different node/edge types
+
+NEXT: 42_hetero_gnn.py -- What if nodes and edges have different TYPES?
     """)

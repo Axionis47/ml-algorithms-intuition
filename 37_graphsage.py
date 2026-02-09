@@ -1,120 +1,94 @@
 """
-GraphSAGE — Inductive Graph Learning
-=====================================
-
-Paradigm: SAMPLE AND AGGREGATE
+GraphSAGE — Paradigm: INDUCTIVE AGGREGATION
 
 ===============================================================
 WHAT IT IS (THE CORE IDEA)
 ===============================================================
 
-LEARN to aggregate neighbor features (don't use fixed weights per node)!
+GraphSAGE = Graph SAmple and aggreGatE (Hamilton et al., 2017)
 
-THE GRAPHSAGE FRAMEWORK:
-    h_v^(k) = σ(W × CONCAT(h_v^(k-1), AGG({h_u^(k-1) : u ∈ N(v)})))
+Instead of fixed graph convolution like GCN, LEARN an aggregation
+function from SAMPLED neighbors.
 
-BREAKDOWN:
-1. h_v^(k-1): Node v's features at layer k-1
-2. AGG: Aggregate function over neighbors
-3. CONCAT: Combine own features with aggregated neighbors
-4. W: Learnable weight matrix
-5. σ: Nonlinearity (ReLU)
+For each node v, at each layer k:
+
+    1. SAMPLE: Pick k neighbors of v (not all!)
+    2. AGGREGATE: Combine neighbor features
+       h_N(v)^(k) = AGGREGATE({h_u^(k-1) : u in SAMPLE(N(v))})
+    3. CONCAT: Combine self with aggregated neighbors
+       h_v^(k) = sigma(W^(k) . CONCAT(h_v^(k-1), h_N(v)^(k)))
+    4. NORMALIZE: L2-normalize the embedding
+       h_v^(k) = h_v^(k) / ||h_v^(k)||
+
+The CONCAT is the key difference from GCN:
+    GCN: smooths self INTO neighbors (weighted average)
+    GraphSAGE: EXPLICITLY separates self from neighbors
 
 ===============================================================
-WHY GRAPHSAGE > GCN?
+WHY GRAPHSAGE > GCN
 ===============================================================
 
-1. INDUCTIVE: Can generalize to UNSEEN nodes/graphs!
-   - GCN learns weights for the SPECIFIC graph
-   - GraphSAGE learns an AGGREGATION FUNCTION
-   - Apply to new graphs, new nodes!
+1. INDUCTIVE: GCN learns weights tied to graph structure.
+   GraphSAGE learns a GENERAL aggregation function.
+   -> Can process UNSEEN nodes and UNSEEN graphs!
 
-2. SAMPLING: Don't need full neighborhood!
-   - Sample k neighbors uniformly
-   - Makes computation tractable for large graphs
-   - Mini-batch training possible
+2. SCALABLE: GCN uses ALL neighbors (full A_hat multiplication).
+   GraphSAGE SAMPLES k neighbors per node per layer.
+   -> Constant computation per node, regardless of degree.
 
-3. FLEXIBLE AGGREGATORS:
-   - Mean: Simple, effective
-   - Max-Pooling: Captures salient features
-   - LSTM: Learns complex combinations
+3. FLEXIBLE: GCN uses fixed degree-weighted mean.
+   GraphSAGE supports multiple aggregator types.
+   -> Mean, pool, max -- each with different strengths.
 
 ===============================================================
 AGGREGATORS
 ===============================================================
 
-1. MEAN AGGREGATOR
-   AGG_mean = mean({h_u : u ∈ N(v)})
+1. MEAN: Simple average of neighbor features
+   h_N(v) = mean({h_u : u in S(N(v))})
+   Equivalent to GCN's normalized mean (but with sampling).
 
-   Simple average of neighbor features.
-   Similar to GCN (but with sampling).
+2. POOL: Apply MLP, then element-wise max-pool
+   h_N(v) = max({sigma(W_pool h_u + b_pool) : u in S(N(v))})
+   More expressive: nonlinear transformation before aggregation.
 
-2. MAX-POOLING AGGREGATOR
-   AGG_pool = max({σ(W_pool h_u + b) : u ∈ N(v)})
-
-   Element-wise max after transformation.
-   Captures most "activated" feature per dimension.
-
-3. LSTM AGGREGATOR
-   AGG_lstm = LSTM({h_u : u ∈ N(v)})
-
-   Process neighbors as sequence.
-   Problem: neighbors have no natural order!
-   Solution: Random permutation (works surprisingly well)
+3. MAX: Element-wise maximum of neighbor features
+   h_N(v) = max({h_u : u in S(N(v))})
+   Captures the most salient feature per dimension.
 
 ===============================================================
-SAMPLING STRATEGY
+SAMPLING: WHY NOT USE ALL NEIGHBORS?
 ===============================================================
 
-THE CHALLENGE:
-Full neighborhood can be huge (degree explosion)
-Layer 1: k neighbors
-Layer 2: k² neighbors
-Layer L: k^L neighbors
+Full neighborhood aggregation has problems:
+1. HIGH-DEGREE NODES: Some nodes have 1000+ neighbors
+   -> Computation and memory explodes
+2. MINI-BATCH TRAINING: Can't fit full neighborhoods in batch
+   -> Need bounded computation per node
+3. REGULARIZATION: Sampling adds stochasticity
+   -> Acts like dropout, prevents overfitting
 
-SOLUTION: Sample fixed number at each layer
-
-S(v) = sample(N(v), size=k)
-
-Typical: k=10-25 neighbors per layer
-
-TRADE-OFF:
-- Larger sample = more accurate, slower
-- Smaller sample = faster, more variance
-
-===============================================================
-TRAINING MODES
-===============================================================
-
-1. SUPERVISED
-   - Given labeled nodes, minimize classification loss
-   - Standard cross-entropy
-
-2. UNSUPERVISED (Random Walk)
-   Loss = -log(σ(z_u · z_v)) - Σ E[log(σ(-z_u · z_w))]
-
-   Maximize similarity for:
-   - Nodes in same random walks (positive)
-   Minimize similarity for:
-   - Random node pairs (negative)
-
-   Similar to word2vec skip-gram!
+Typical sample sizes: 10-25 per layer
+With 2 layers: at most 25 * 25 = 625 nodes per ego-graph
 
 ===============================================================
 INDUCTIVE BIAS
 ===============================================================
 
-1. AGGREGATION FUNCTION
-   - Same function everywhere
-   - Generalizes to new graphs
+1. LEARNED AGGREGATION: Generalizes to new structures
+2. CONCAT(self, neighbors): Self-info never lost (unlike GCN)
+3. SAMPLING: Bounded computation, stochastic regularization
+4. HOMOPHILY: Still assumes neighbors share information
+5. LOCAL: k layers = k-hop, same as GCN
 
-2. LOCALITY
-   - Still aggregates from local neighborhood
-   - But LEARNS how to aggregate
+WHEN IT WORKS:
+    Inductive: train on one graph, test on another
+    Large graphs: sampling makes it scalable
+    Dynamic graphs: new nodes can be classified immediately
 
-3. SAMPLING
-   - Approximates full aggregation
-   - Trade accuracy for scalability
+WHEN IT FAILS:
+    Very heterophilic graphs (neighbors are different classes)
+    Very small sample sizes lose too much information
 
 ===============================================================
 """
@@ -123,507 +97,472 @@ import numpy as np
 import matplotlib.pyplot as plt
 import sys
 sys.path.insert(0, '/Users/sid47/ML Algorithms')
-
 from importlib import import_module
-graph_fund = import_module('35_graph_fundamentals')
-Graph = graph_fund.Graph
-karate_club = graph_fund.karate_club
-create_community_graph = graph_fund.create_community_graph
-spring_layout = graph_fund.spring_layout
+graph_module = import_module('35_graph_fundamentals')
+Graph = graph_module.Graph
+karate_club = graph_module.karate_club
+create_community_graph = graph_module.create_community_graph
+create_citation_network = graph_module.create_citation_network
+create_transductive_split = graph_module.create_transductive_split
+spring_layout = graph_module.spring_layout
+draw_graph = graph_module.draw_graph
+
+gcn_module = import_module('36_gcn')
+softmax = gcn_module.softmax
+cross_entropy_loss = gcn_module.cross_entropy_loss
+compute_normalized_adjacency = gcn_module.compute_normalized_adjacency
+GCN = gcn_module.GCN
 
 
-class MeanAggregator:
-    """
-    MEAN AGGREGATOR
-
-    AGG_mean(v) = mean({h_u : u ∈ S(v)})
-
-    Simple and effective. Similar to GCN.
-    """
-
-    def __init__(self):
-        self.name = 'mean'
-
-    def aggregate(self, neighbor_features):
-        """
-        neighbor_features: list of feature vectors from neighbors
-        """
-        if len(neighbor_features) == 0:
-            return np.zeros_like(neighbor_features[0]) if neighbor_features else None
-        return np.mean(neighbor_features, axis=0)
-
-
-class PoolingAggregator:
-    """
-    MAX-POOLING AGGREGATOR
-
-    AGG_pool(v) = max({σ(W h_u + b) : u ∈ S(v)})
-
-    First transform, then take element-wise maximum.
-    Captures most "activated" features.
-    """
-
-    def __init__(self, input_dim, hidden_dim=None):
-        if hidden_dim is None:
-            hidden_dim = input_dim
-
-        scale = np.sqrt(2.0 / (input_dim + hidden_dim))
-        self.W = np.random.randn(input_dim, hidden_dim) * scale
-        self.b = np.zeros(hidden_dim)
-        self.name = 'pool'
-
-    def aggregate(self, neighbor_features):
-        if len(neighbor_features) == 0:
-            return np.zeros(self.W.shape[1])
-
-        # Transform each neighbor
-        transformed = []
-        for h in neighbor_features:
-            z = h @ self.W + self.b
-            transformed.append(np.maximum(0, z))  # ReLU
-
-        # Element-wise max
-        return np.max(transformed, axis=0)
-
-
-class GraphSAGELayer:
-    """
-    Single GraphSAGE Layer
-
-    h_v^(k) = σ(W · CONCAT(h_v^(k-1), AGG({h_u^(k-1)})))
-    """
-
-    def __init__(self, input_dim, output_dim, aggregator_type='mean',
-                 sample_size=10, activation='relu'):
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.sample_size = sample_size
-        self.activation = activation
-
-        # Aggregator
-        if aggregator_type == 'mean':
-            self.aggregator = MeanAggregator()
-        elif aggregator_type == 'pool':
-            self.aggregator = PoolingAggregator(input_dim)
-        else:
-            self.aggregator = MeanAggregator()
-
-        # Weight for concatenated features: [self || neighbors]
-        # Input: 2 * input_dim (self + aggregated neighbors)
-        concat_dim = 2 * input_dim
-
-        scale = np.sqrt(2.0 / (concat_dim + output_dim))
-        self.W = np.random.randn(concat_dim, output_dim) * scale
-        self.b = np.zeros(output_dim)
-
-        self.cache = {}
-
-    def sample_neighbors(self, graph, node, current_features):
-        """Sample neighbors for a node."""
-        neighbors = graph.get_neighbors(node)
-
-        if len(neighbors) == 0:
-            # No neighbors: use self
-            return [current_features[node]]
-
-        if len(neighbors) <= self.sample_size:
-            sampled = neighbors
-        else:
-            sampled = np.random.choice(neighbors, self.sample_size, replace=False)
-
-        return [current_features[n] for n in sampled]
-
-    def forward(self, graph, features):
-        """
-        Forward pass for all nodes.
-
-        graph: Graph object
-        features: (n_nodes, input_dim) current node features
-
-        Returns: (n_nodes, output_dim) new node features
-        """
-        n_nodes = graph.n_nodes
-        output = np.zeros((n_nodes, self.output_dim))
-
-        all_concatenated = []
-
-        for v in range(n_nodes):
-            # Sample and aggregate neighbors
-            neighbor_features = self.sample_neighbors(graph, v, features)
-            aggregated = self.aggregator.aggregate(neighbor_features)
-
-            if aggregated is None:
-                aggregated = np.zeros(self.input_dim)
-
-            # Concatenate self and aggregated
-            concat = np.concatenate([features[v], aggregated])
-            all_concatenated.append(concat)
-
-            # Transform
-            z = concat @ self.W + self.b
-
-            # Activation
-            if self.activation == 'relu':
-                output[v] = np.maximum(0, z)
-            else:
-                output[v] = z
-
-        self.cache = {
-            'features': features,
-            'concatenated': np.array(all_concatenated),
-            'output': output
-        }
-
-        # L2 normalize (important for GraphSAGE)
-        norms = np.linalg.norm(output, axis=1, keepdims=True)
-        output = output / (norms + 1e-10)
-
-        return output
-
-    def backward(self, d_output, learning_rate=0.01):
-        """Backward pass (simplified)."""
-        concat = self.cache['concatenated']
-        output = self.cache['output']
-
-        # Gradient through L2 norm (simplified: ignore for now)
-        d_z = d_output
-
-        # Gradient through activation
-        if self.activation == 'relu':
-            d_z = d_z * (output > 0)
-
-        # Gradient for W and b
-        dW = concat.T @ d_z
-        db = np.sum(d_z, axis=0)
-
-        # Update
-        self.W -= learning_rate * dW / len(d_output)
-        self.b -= learning_rate * db / len(d_output)
-
-        # Gradient for input (for further backprop)
-        d_concat = d_z @ self.W.T
-
-        # Split into self and aggregated gradients
-        d_features = d_concat[:, :self.input_dim]
-
-        return d_features
-
+# ============================================================
+# GRAPHSAGE IMPLEMENTATION
+# ============================================================
 
 class GraphSAGE:
     """
-    GraphSAGE: Sample and Aggregate
+    GraphSAGE: Graph SAmple and aggreGatE.
 
-    Inductive node embedding through learned aggregation.
+    Paradigm: INDUCTIVE AGGREGATION
+
+    Key difference from GCN:
+        GCN:       H' = sigma( A_hat H W )   (fixed graph convolution)
+        GraphSAGE: h_v = sigma( W . CONCAT(h_v, AGG({h_u : u in S(N(v))})) )
+
+    The aggregation function is LEARNED, not fixed.
+    Neighbors are SAMPLED, not all used.
+    Self-features are CONCATENATED, not smoothed in.
     """
 
-    def __init__(self, n_features, hidden_dims, n_classes,
-                 aggregator_type='mean', sample_sizes=None):
+    def __init__(self, n_features, n_hidden, n_classes, n_layers=2,
+                 aggregator='mean', sample_size=10, dropout=0.5,
+                 lr=0.01, random_state=None):
         """
         Parameters:
-        - n_features: Input feature dimension
-        - hidden_dims: List of hidden dimensions
-        - n_classes: Number of output classes
-        - aggregator_type: 'mean' or 'pool'
-        - sample_sizes: Number of neighbors to sample at each layer
+        -----------
+        n_features : int
+            Input feature dimension
+        n_hidden : int
+            Hidden layer dimension
+        n_classes : int
+            Number of output classes
+        n_layers : int
+            Number of GraphSAGE layers (2 recommended)
+        aggregator : str
+            'mean', 'pool', or 'max'
+        sample_size : int
+            Number of neighbors to sample per node per layer
+        dropout : float
+            Dropout rate
+        lr : float
+            Learning rate
+        random_state : int or None
         """
-        self.layers = []
+        self.n_features = n_features
+        self.n_hidden = n_hidden
+        self.n_classes = n_classes
+        self.n_layers = n_layers
+        self.aggregator = aggregator
+        self.sample_size = sample_size
+        self.dropout = dropout
+        self.lr = lr
+        self.random_state = random_state
 
-        if sample_sizes is None:
-            sample_sizes = [10] * (len(hidden_dims) + 1)
+        self._init_weights()
 
-        # Build layers
-        dims = [n_features] + hidden_dims + [n_classes]
-        for i in range(len(dims) - 1):
-            activation = 'none' if i == len(dims) - 2 else 'relu'
-            layer = GraphSAGELayer(
-                dims[i], dims[i+1],
-                aggregator_type=aggregator_type,
-                sample_size=sample_sizes[i],
-                activation=activation
-            )
-            self.layers.append(layer)
+    def _init_weights(self):
+        """Xavier initialization for all layers."""
+        if self.random_state is not None:
+            np.random.seed(self.random_state)
 
-    def forward(self, graph):
-        """Forward pass through all layers."""
-        h = graph.X
-        for layer in self.layers:
-            h = layer.forward(graph, h)
+        self.weights = []
+        self.biases = []
 
-        # Softmax for output
-        exp_h = np.exp(h - np.max(h, axis=1, keepdims=True))
-        probs = exp_h / np.sum(exp_h, axis=1, keepdims=True)
+        # Pool aggregator has extra MLP weights per layer
+        self.pool_weights = []
+        self.pool_biases = []
 
-        return probs
+        # Layer dimensions:
+        # Layer 0: CONCAT(self=n_features, agg=n_features) -> n_hidden
+        # Layer 1..L-2: CONCAT(self=n_hidden, agg=n_hidden) -> n_hidden
+        # Layer L-1: CONCAT(self=n_hidden, agg=n_hidden) -> n_classes
 
-    def compute_loss(self, probs, labels, mask):
-        """Cross-entropy loss."""
-        eps = 1e-10
-        loss = -np.mean(np.log(probs[mask, labels[mask]] + eps))
-        return loss
+        for l in range(self.n_layers):
+            if l == 0:
+                d_in = self.n_features
+            else:
+                d_in = self.n_hidden
 
-    def fit(self, graph, labels, train_mask, val_mask=None,
-            epochs=200, learning_rate=0.01, verbose=True):
-        """Train GraphSAGE."""
-        train_losses = []
-        val_accs = []
+            if l == self.n_layers - 1:
+                d_out = self.n_classes
+            else:
+                d_out = self.n_hidden
 
-        for epoch in range(epochs):
+            # CONCAT(self, aggregated) -> 2 * d_in input dimension
+            concat_dim = 2 * d_in
+            std = np.sqrt(2.0 / (concat_dim + d_out))
+            W = np.random.randn(concat_dim, d_out) * std
+            b = np.zeros(d_out)
+            self.weights.append(W)
+            self.biases.append(b)
+
+            # Pool aggregator MLP: d_in -> d_in
+            if self.aggregator == 'pool':
+                std_pool = np.sqrt(2.0 / (d_in + d_in))
+                W_pool = np.random.randn(d_in, d_in) * std_pool
+                b_pool = np.zeros(d_in)
+                self.pool_weights.append(W_pool)
+                self.pool_biases.append(b_pool)
+
+    def _sample_neighbors(self, graph, node, k):
+        """
+        Sample k neighbors for a node.
+
+        If the node has fewer than k neighbors, use all of them.
+        If the node has no neighbors, return [node] (self-loop fallback).
+
+        Parameters:
+        -----------
+        graph : Graph
+        node : int
+        k : int - number of neighbors to sample
+
+        Returns: array of sampled neighbor indices
+        """
+        neighbors = graph.neighbors(node)
+
+        if len(neighbors) == 0:
+            # Isolated node: use self as fallback
+            return np.array([node])
+
+        if k >= len(neighbors):
+            # Use all neighbors (no sampling needed)
+            return neighbors
+
+        # Sample k neighbors without replacement
+        return np.random.choice(neighbors, size=k, replace=False)
+
+    def _aggregate_mean(self, neighbor_features):
+        """
+        Mean aggregator: simple average of neighbor features.
+
+        Parameters:
+        -----------
+        neighbor_features : ndarray (k, d) -- features of sampled neighbors
+
+        Returns: ndarray (d,) -- aggregated feature vector
+        """
+        return np.mean(neighbor_features, axis=0)
+
+    def _aggregate_pool(self, neighbor_features, W_pool, b_pool):
+        """
+        Pool aggregator: MLP followed by element-wise max-pooling.
+
+        h_N(v) = max(sigma(W_pool * h_u + b_pool) for u in neighbors)
+
+        Parameters:
+        -----------
+        neighbor_features : ndarray (k, d)
+        W_pool : ndarray (d, d) -- pool MLP weights
+        b_pool : ndarray (d,) -- pool MLP bias
+
+        Returns: ndarray (d,) -- aggregated feature vector
+        """
+        # Apply MLP: sigma(W_pool * h + b_pool)
+        transformed = neighbor_features @ W_pool + b_pool
+        transformed = np.maximum(transformed, 0)  # ReLU
+
+        # Element-wise max pooling
+        return np.max(transformed, axis=0)
+
+    def _aggregate_max(self, neighbor_features):
+        """
+        Max aggregator: element-wise maximum of neighbor features.
+
+        Parameters:
+        -----------
+        neighbor_features : ndarray (k, d)
+
+        Returns: ndarray (d,) -- aggregated feature vector
+        """
+        return np.max(neighbor_features, axis=0)
+
+    def forward(self, graph, X=None, training=True):
+        """
+        Forward pass through all GraphSAGE layers.
+
+        For each layer:
+            1. Sample neighbors for each node
+            2. Aggregate neighbor features
+            3. Concat(self, aggregated)
+            4. Linear transform + activation
+            5. L2 normalize (hidden layers)
+
+        Parameters:
+        -----------
+        graph : Graph
+        X : ndarray (n, d) or None -- node features (uses graph.X if None)
+        training : bool -- if True, apply dropout
+
+        Returns: (output_probs, cache)
+        """
+        if X is None:
+            X = graph.X
+
+        n = graph.n_nodes
+        H = X.copy()
+
+        cache = {
+            'H': [H.copy()],
+            'Z': [],
+            'concat': [],
+            'agg': [],
+            'sampled_neighbors': [],
+            'neighbor_features': [],
+            'pool_pre_relu': [],
+            'dropout_masks': [],
+            'H_pre_norm': [],
+        }
+
+        for l in range(self.n_layers):
+            d_in = H.shape[1]
+            aggregated = np.zeros((n, d_in))
+            sampled = []
+            neigh_feats_layer = []
+            pool_pre_relu_layer = []
+
+            for v in range(n):
+                # Step 1: Sample neighbors
+                neighbors_v = self._sample_neighbors(graph, v, self.sample_size)
+                sampled.append(neighbors_v)
+
+                # Step 2: Get neighbor features
+                neigh_feats = H[neighbors_v]
+                neigh_feats_layer.append(neigh_feats)
+
+                # Step 3: Aggregate
+                if self.aggregator == 'mean':
+                    aggregated[v] = self._aggregate_mean(neigh_feats)
+                elif self.aggregator == 'pool':
+                    pre_relu = neigh_feats @ self.pool_weights[l] + self.pool_biases[l]
+                    pool_pre_relu_layer.append(pre_relu)
+                    aggregated[v] = self._aggregate_pool(
+                        neigh_feats, self.pool_weights[l], self.pool_biases[l]
+                    )
+                elif self.aggregator == 'max':
+                    aggregated[v] = self._aggregate_max(neigh_feats)
+
+            cache['sampled_neighbors'].append(sampled)
+            cache['neighbor_features'].append(neigh_feats_layer)
+            cache['pool_pre_relu'].append(pool_pre_relu_layer)
+            cache['agg'].append(aggregated.copy())
+
+            # Step 4: Concatenate self with aggregated
+            concat_features = np.concatenate([H, aggregated], axis=1)
+            cache['concat'].append(concat_features.copy())
+
+            # Step 5: Linear transform
+            Z = concat_features @ self.weights[l] + self.biases[l]
+            cache['Z'].append(Z.copy())
+
+            # Step 6: Activation
+            if l < self.n_layers - 1:
+                # Hidden layer: ReLU
+                H = np.maximum(Z, 0)
+
+                # Dropout
+                if training and self.dropout > 0:
+                    mask = (np.random.rand(*H.shape) > self.dropout).astype(float)
+                    H = H * mask / (1 - self.dropout + 1e-10)
+                    cache['dropout_masks'].append(mask)
+                else:
+                    cache['dropout_masks'].append(np.ones_like(H))
+
+                cache['H_pre_norm'].append(H.copy())
+
+                # L2 normalize (stabilizes training)
+                norms = np.linalg.norm(H, axis=1, keepdims=True)
+                norms = np.maximum(norms, 1e-8)
+                H = H / norms
+            else:
+                # Output layer: softmax
+                H = softmax(Z)
+                cache['H_pre_norm'].append(None)
+
+            cache['H'].append(H.copy())
+
+        return H, cache
+
+    def backward(self, graph, y, mask, cache):
+        """
+        Full backpropagation through all GraphSAGE layers.
+
+        Chain rule through:
+        softmax -> linear -> concat -> (aggregate + self)
+        -> relu -> dropout -> L2norm -> linear -> ...
+
+        Parameters:
+        -----------
+        graph : Graph
+        y : ndarray -- true labels
+        mask : boolean array -- train mask
+        cache : dict -- from forward pass
+        """
+        n = len(y)
+        probs = cache['H'][-1]
+
+        # Gradient of cross-entropy + softmax
+        dZ = probs.copy()
+        dZ[np.arange(n), y] -= 1
+
+        # Mask: only backprop through train nodes
+        mask_float = mask.astype(float)
+        n_train = max(np.sum(mask), 1)
+        dZ = dZ * mask_float[:, None] / n_train
+
+        for l in range(self.n_layers - 1, -1, -1):
+            concat_features = cache['concat'][l]
+            H_prev = cache['H'][l]
+            d_in = H_prev.shape[1]
+
+            # Gradient w.r.t. weights and biases
+            gW = concat_features.T @ dZ
+            gb = np.sum(dZ, axis=0)
+
+            # Gradient w.r.t. concat_features
+            dConcat = dZ @ self.weights[l].T
+
+            # Split gradient into self and aggregated parts
+            dSelf = dConcat[:, :d_in]
+            dAgg = dConcat[:, d_in:]
+
+            # Gradient through aggregation -> to previous layer features
+            dH_prev = dSelf.copy()
+
+            if self.aggregator == 'mean':
+                for v in range(n):
+                    neighbors_v = cache['sampled_neighbors'][l][v]
+                    k = len(neighbors_v)
+                    if k > 0:
+                        for nb in neighbors_v:
+                            dH_prev[nb] += dAgg[v] / k
+
+            elif self.aggregator == 'pool':
+                dW_pool = np.zeros_like(self.pool_weights[l])
+                db_pool = np.zeros_like(self.pool_biases[l])
+
+                for v in range(n):
+                    neighbors_v = cache['sampled_neighbors'][l][v]
+                    neigh_feats = cache['neighbor_features'][l][v]
+                    pre_relu = cache['pool_pre_relu'][l][v]
+
+                    if len(neighbors_v) == 0:
+                        continue
+
+                    post_relu = np.maximum(pre_relu, 0)
+                    max_idx = np.argmax(post_relu, axis=0)
+
+                    d_post_relu = np.zeros_like(post_relu)
+                    for dim in range(d_post_relu.shape[1]):
+                        d_post_relu[max_idx[dim], dim] = dAgg[v, dim]
+
+                    d_pre_relu = d_post_relu * (pre_relu > 0).astype(float)
+
+                    dW_pool += neigh_feats.T @ d_pre_relu
+                    db_pool += np.sum(d_pre_relu, axis=0)
+
+                    d_neigh = d_pre_relu @ self.pool_weights[l].T
+                    for idx, nb in enumerate(neighbors_v):
+                        dH_prev[nb] += d_neigh[idx]
+
+                self.pool_weights[l] -= self.lr * dW_pool
+                self.pool_biases[l] -= self.lr * db_pool
+
+            elif self.aggregator == 'max':
+                for v in range(n):
+                    neighbors_v = cache['sampled_neighbors'][l][v]
+                    neigh_feats = cache['neighbor_features'][l][v]
+
+                    if len(neighbors_v) == 0:
+                        continue
+
+                    max_idx = np.argmax(neigh_feats, axis=0)
+                    for dim in range(neigh_feats.shape[1]):
+                        nb_idx = max_idx[dim]
+                        if nb_idx < len(neighbors_v):
+                            dH_prev[neighbors_v[nb_idx]] += dAgg[v, dim]
+
+            # Update weights for this layer
+            self.weights[l] -= self.lr * gW
+            self.biases[l] -= self.lr * gb
+
+            # Prepare gradient for previous layer
+            if l > 0:
+                # Backprop through L2 normalization
+                H_pre_norm = cache['H_pre_norm'][l - 1]
+                if H_pre_norm is not None:
+                    norms = np.linalg.norm(H_pre_norm, axis=1, keepdims=True)
+                    norms = np.maximum(norms, 1e-8)
+                    H_normed = H_pre_norm / norms
+
+                    dot_products = np.sum(dH_prev * H_normed, axis=1, keepdims=True)
+                    dH_pre_norm = (dH_prev - H_normed * dot_products) / norms
+                else:
+                    dH_pre_norm = dH_prev
+
+                # Backprop through dropout
+                dH_pre_norm = dH_pre_norm * cache['dropout_masks'][l - 1] / (1 - self.dropout + 1e-10)
+
+                # Backprop through ReLU
+                dZ = dH_pre_norm * (cache['Z'][l - 1] > 0).astype(float)
+
+    def fit(self, graph, labels, train_mask, n_epochs=200, verbose=True):
+        """
+        Train GraphSAGE with transductive split.
+
+        Parameters:
+        -----------
+        graph : Graph
+        labels : ndarray -- node labels
+        train_mask : boolean array
+        n_epochs : int
+        verbose : bool
+
+        Returns: loss_history
+        """
+        loss_history = []
+
+        for epoch in range(n_epochs):
             # Forward pass
-            probs = self.forward(graph)
-            loss = self.compute_loss(probs, labels, train_mask)
-            train_losses.append(loss)
+            probs, cache = self.forward(graph, training=True)
 
-            # Backward pass (simplified)
-            n = graph.n_nodes
-            Y_one_hot = np.zeros((n, probs.shape[1]))
-            Y_one_hot[np.arange(n), labels] = 1
+            # Loss
+            loss = cross_entropy_loss(probs, labels, train_mask)
+            loss_history.append(loss)
 
-            d_probs = (probs - Y_one_hot) / np.sum(train_mask)
-            d_probs[~train_mask] = 0
-
-            d_h = d_probs
-            for layer in reversed(self.layers):
-                d_h = layer.backward(d_h, learning_rate)
-
-            # Validation
-            if val_mask is not None:
-                pred = np.argmax(probs[val_mask], axis=1)
-                acc = np.mean(pred == labels[val_mask])
-                val_accs.append(acc)
+            # Backward pass
+            self.backward(graph, labels, train_mask, cache)
 
             if verbose and (epoch + 1) % 50 == 0:
-                msg = f"Epoch {epoch+1}: loss={loss:.4f}"
-                if val_mask is not None:
-                    msg += f", val_acc={acc:.3f}"
-                print(msg)
+                train_pred = np.argmax(probs, axis=1)
+                train_acc = np.mean(train_pred[train_mask] == labels[train_mask])
+                print(f"  Epoch {epoch+1:>4}: loss={loss:.4f}, train_acc={train_acc:.3f}")
 
-        return train_losses, val_accs
+        return loss_history
 
     def predict(self, graph):
-        """Predict labels."""
-        probs = self.forward(graph)
+        """Predict node labels."""
+        probs, _ = self.forward(graph, training=False)
         return np.argmax(probs, axis=1)
 
+    def predict_proba(self, graph):
+        """Predict node class probabilities."""
+        probs, _ = self.forward(graph, training=False)
+        return probs
 
-# ============================================================
-# INDUCTIVE TESTING
-# ============================================================
-
-def test_inductive(model, train_graph, test_graph, train_labels, test_labels):
-    """
-    Test INDUCTIVE capability: Train on one graph, test on another!
-
-    This is what makes GraphSAGE special.
-    GCN can't do this easily.
-    """
-    # Predict on new graph
-    pred = model.predict(test_graph)
-    accuracy = np.mean(pred == test_labels)
-    return accuracy
-
-
-# ============================================================
-# VISUALIZATION
-# ============================================================
-
-def visualize_graphsage():
-    """
-    Create comprehensive GraphSAGE visualization:
-    1. Node classification
-    2. Aggregator comparison
-    3. Sample size effect
-    4. INDUCTIVE capability
-    5. Embedding space
-    6. Summary
-    """
-    print("\n" + "="*60)
-    print("GRAPHSAGE VISUALIZATION")
-    print("="*60)
-
-    fig = plt.figure(figsize=(16, 12))
-    np.random.seed(42)
-
-    graph, labels = karate_club()
-    graph.X = np.random.randn(graph.n_nodes, 16)
-
-    # ============ Plot 1: GraphSAGE Classification ============
-    ax1 = fig.add_subplot(2, 3, 1)
-
-    train_mask = np.zeros(graph.n_nodes, dtype=bool)
-    train_mask[[0, 1, 2, 30, 32, 33]] = True
-
-    model = GraphSAGE(n_features=16, hidden_dims=[16], n_classes=2,
-                      aggregator_type='mean')
-    losses, _ = model.fit(graph, labels, train_mask, epochs=200, verbose=False)
-
-    pred = model.predict(graph)
-    acc = np.mean(pred == labels)
-
-    pos = spring_layout(graph)
-    for i, j in graph.get_edge_list():
-        ax1.plot([pos[i, 0], pos[j, 0]], [pos[i, 1], pos[j, 1]],
-                'k-', alpha=0.2, linewidth=0.5)
-
-    colors = ['red' if l == 0 else 'blue' for l in labels]
-    for i in range(graph.n_nodes):
-        marker = 'o' if pred[i] == labels[i] else 'X'
-        ax1.scatter(pos[i, 0], pos[i, 1], c=colors[i], s=100,
-                   marker=marker, edgecolors='black', zorder=5)
-
-    ax1.set_title(f'GraphSAGE Classification\nAccuracy: {acc:.0%}')
-    ax1.axis('off')
-
-    # ============ Plot 2: Aggregator Comparison ============
-    ax2 = fig.add_subplot(2, 3, 2)
-
-    aggregators = ['mean', 'pool']
-    n_runs = 5
-
-    results = {}
-    for agg in aggregators:
-        accs = []
-        for _ in range(n_runs):
-            graph, labels = karate_club()
-            graph.X = np.random.randn(graph.n_nodes, 16)
-            model = GraphSAGE(n_features=16, hidden_dims=[16], n_classes=2,
-                              aggregator_type=agg)
-            model.fit(graph, labels, train_mask, epochs=200, verbose=False)
-            pred = model.predict(graph)
-            accs.append(np.mean(pred == labels))
-        results[agg] = accs
-
-    x = np.arange(len(aggregators))
-    means = [np.mean(results[a]) for a in aggregators]
-    stds = [np.std(results[a]) for a in aggregators]
-
-    ax2.bar(x, means, yerr=stds, capsize=5, color=['steelblue', 'coral'])
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(['Mean', 'Max-Pool'])
-    ax2.set_ylabel('Accuracy')
-    ax2.set_title('Aggregator Comparison\nBoth work well on this task')
-    ax2.set_ylim(0, 1.1)
-
-    # ============ Plot 3: Sample Size Effect ============
-    ax3 = fig.add_subplot(2, 3, 3)
-
-    sample_sizes = [1, 3, 5, 10, 20]
-    mean_accs = []
-    std_accs = []
-
-    for sample_size in sample_sizes:
-        accs = []
-        for _ in range(n_runs):
-            graph, labels = karate_club()
-            graph.X = np.random.randn(graph.n_nodes, 16)
-            model = GraphSAGE(n_features=16, hidden_dims=[16], n_classes=2,
-                              sample_sizes=[sample_size, sample_size])
-            model.fit(graph, labels, train_mask, epochs=200, verbose=False)
-            accs.append(np.mean(model.predict(graph) == labels))
-        mean_accs.append(np.mean(accs))
-        std_accs.append(np.std(accs))
-
-    ax3.errorbar(sample_sizes, mean_accs, yerr=std_accs, marker='o',
-                capsize=5, linewidth=2, markersize=8)
-    ax3.set_xlabel('Sample Size')
-    ax3.set_ylabel('Accuracy')
-    ax3.set_title('Effect of Sample Size\nMore neighbors = better (but slower)')
-    ax3.grid(True, alpha=0.3)
-
-    # ============ Plot 4: INDUCTIVE LEARNING ============
-    ax4 = fig.add_subplot(2, 3, 4)
-
-    # Train on one graph, test on another!
-    train_graph, train_labels = create_community_graph(
-        n_communities=2, nodes_per_community=30, p_in=0.3, p_out=0.02
-    )
-    test_graph, test_labels = create_community_graph(
-        n_communities=2, nodes_per_community=30, p_in=0.3, p_out=0.02
-    )
-
-    # Full training on train graph
-    train_mask_full = np.ones(train_graph.n_nodes, dtype=bool)
-
-    model = GraphSAGE(n_features=8, hidden_dims=[8], n_classes=2)
-    model.fit(train_graph, train_labels, train_mask_full, epochs=200, verbose=False)
-
-    # Test on DIFFERENT graph!
-    train_acc = np.mean(model.predict(train_graph) == train_labels)
-    test_acc = np.mean(model.predict(test_graph) == test_labels)
-
-    x = np.arange(2)
-    ax4.bar(x, [train_acc, test_acc], color=['steelblue', 'coral'])
-    ax4.set_xticks(x)
-    ax4.set_xticklabels(['Train Graph', 'NEW Graph'])
-    ax4.set_ylabel('Accuracy')
-    ax4.set_title('INDUCTIVE LEARNING\nGeneralizes to unseen graph!')
-    ax4.set_ylim(0, 1.1)
-
-    # Add annotation
-    ax4.annotate('Same model\ndifferent graph!', xy=(1, test_acc),
-                xytext=(1.3, test_acc - 0.2),
-                arrowprops=dict(arrowstyle='->', color='red'),
-                fontsize=10, color='red')
-
-    # ============ Plot 5: Learning Curve ============
-    ax5 = fig.add_subplot(2, 3, 5)
-
-    graph, labels = karate_club()
-    graph.X = np.random.randn(graph.n_nodes, 16)
-
-    model = GraphSAGE(n_features=16, hidden_dims=[16], n_classes=2)
-    losses, _ = model.fit(graph, labels, train_mask, epochs=300, verbose=False)
-
-    ax5.plot(losses, 'b-', linewidth=2)
-    ax5.set_xlabel('Epoch')
-    ax5.set_ylabel('Cross-Entropy Loss')
-    ax5.set_title('GraphSAGE Training\nLoss decreases smoothly')
-    ax5.grid(True, alpha=0.3)
-
-    # ============ Plot 6: Summary ============
-    ax6 = fig.add_subplot(2, 3, 6)
-    ax6.axis('off')
-
-    summary = """
-    GraphSAGE — Sample and Aggregate
-    ═════════════════════════════════
-
-    THE KEY IDEA:
-    LEARN the aggregation function!
-
-    h_v = σ(W·CONCAT(h_v, AGG(neighbors)))
-
-    AGGREGATORS:
-    • Mean: Simple average
-    • Pool: Max after transform
-    • LSTM: Sequence over neighbors
-
-    ADVANTAGES:
-    ┌─────────────────────────┐
-    │ ✓ INDUCTIVE             │
-    │   Works on new graphs!  │
-    ├─────────────────────────┤
-    │ ✓ SCALABLE              │
-    │   Sample neighbors      │
-    ├─────────────────────────┤
-    │ ✓ MINI-BATCH            │
-    │   Train on subgraphs    │
-    └─────────────────────────┘
-
-    vs GCN:
-    GCN: Fixed aggregation (degree-weighted)
-    GraphSAGE: LEARNED aggregation
-    """
-
-    ax6.text(0.05, 0.95, summary, transform=ax6.transAxes, fontsize=10,
-             verticalalignment='top', fontfamily='monospace',
-             bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.3))
-
-    plt.suptitle('GraphSAGE — Inductive Node Representation Learning\n'
-                 'Sample neighbors, learn to aggregate, generalize to new graphs',
-                 fontsize=14, fontweight='bold')
-    plt.tight_layout()
-
-    return fig
+    def get_embeddings(self, graph):
+        """Get learned node representations from second-to-last layer."""
+        _, cache = self.forward(graph, training=False)
+        return cache['H'][-2]
 
 
 # ============================================================
@@ -631,104 +570,500 @@ def visualize_graphsage():
 # ============================================================
 
 def ablation_experiments():
-    """Run ablation experiments for GraphSAGE."""
-
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("ABLATION EXPERIMENTS")
-    print("="*60)
+    print("=" * 60)
 
+    # -------- Experiment 1: Aggregator Comparison --------
+    print("\n1. AGGREGATOR COMPARISON (mean vs pool vs max)")
+    print("-" * 40)
+    print("Which aggregation strategy works best?")
+
+    graph, labels = create_community_graph(
+        n_communities=3, nodes_per_community=25,
+        p_in=0.25, p_out=0.02, feature_dim=16, random_state=42
+    )
+    n_classes = 3
+    train_mask, val_mask, test_mask = create_transductive_split(
+        graph.n_nodes, labels, train_ratio=0.15, val_ratio=0.1
+    )
+
+    agg_results = {}
+    for agg in ['mean', 'pool', 'max']:
+        accs = []
+        for trial in range(3):
+            model = GraphSAGE(
+                graph.X.shape[1], 16, n_classes, n_layers=2,
+                aggregator=agg, sample_size=10, dropout=0.3,
+                lr=0.01, random_state=42 + trial
+            )
+            model.fit(graph, labels, train_mask, n_epochs=200, verbose=False)
+            preds = model.predict(graph)
+            test_acc = np.mean(preds[test_mask] == labels[test_mask])
+            accs.append(test_acc)
+
+        mean_acc = np.mean(accs)
+        std_acc = np.std(accs)
+        agg_results[agg] = mean_acc
+        print(f"  {agg:<6}  test_acc={mean_acc:.3f} +/- {std_acc:.3f}")
+
+    print("-> Mean: simplest, usually competitive")
+    print("-> Pool: most expressive (MLP + max), captures nonlinear patterns")
+    print("-> Max: captures salient features, ignores quantity")
+
+    # -------- Experiment 2: Sample Size --------
+    print("\n2. SAMPLE SIZE (neighbors per node)")
+    print("-" * 40)
+    print("How many neighbors do we need to sample?")
+
+    for sample_size in [3, 5, 10, 25, 100]:
+        label = f"k={sample_size}" if sample_size < 100 else "k=ALL"
+        model = GraphSAGE(
+            graph.X.shape[1], 16, n_classes, n_layers=2,
+            aggregator='mean', sample_size=sample_size, dropout=0.3,
+            lr=0.01, random_state=42
+        )
+        model.fit(graph, labels, train_mask, n_epochs=200, verbose=False)
+        preds = model.predict(graph)
+        test_acc = np.mean(preds[test_mask] == labels[test_mask])
+
+        avg_deg = np.mean(graph.degrees())
+        coverage = min(sample_size / max(avg_deg, 1), 1.0)
+
+        print(f"  {label:<8}  test_acc={test_acc:.3f}"
+              f"  coverage={coverage:.1%} of avg_degree={avg_deg:.1f}")
+
+    print("-> Small sample: faster but noisier")
+    print("-> k=10-25 usually sufficient")
+    print("-> Sampling adds regularization (like dropout)")
+
+    # -------- Experiment 3: INDUCTIVE Generalization --------
+    print("\n3. INDUCTIVE GENERALIZATION")
+    print("-" * 40)
+    print("Train on one graph, test on a DIFFERENT graph!")
+    print("This is where GraphSAGE shines vs GCN.")
+
+    # Train graph: 3 communities, 20 nodes each
+    train_graph, train_labels = create_community_graph(
+        n_communities=3, nodes_per_community=20,
+        p_in=0.25, p_out=0.02, feature_dim=16, random_state=42
+    )
+    train_mask_ind = np.ones(train_graph.n_nodes, dtype=bool)
+
+    # Test graph: 3 communities, 30 nodes each (DIFFERENT graph!)
+    test_graph, test_labels = create_community_graph(
+        n_communities=3, nodes_per_community=30,
+        p_in=0.25, p_out=0.02, feature_dim=16, random_state=99
+    )
+
+    # GraphSAGE: train on train_graph, test on test_graph
+    sage = GraphSAGE(
+        train_graph.X.shape[1], 16, n_classes, n_layers=2,
+        aggregator='mean', sample_size=10, dropout=0.3,
+        lr=0.01, random_state=42
+    )
+    sage.fit(train_graph, train_labels, train_mask_ind, n_epochs=300, verbose=False)
+
+    sage_train_preds = sage.predict(train_graph)
+    sage_train_acc = np.mean(sage_train_preds == train_labels)
+    sage_test_preds = sage.predict(test_graph)
+    sage_test_acc = np.mean(sage_test_preds == test_labels)
+
+    print(f"\n  GraphSAGE:")
+    print(f"    Train graph acc: {sage_train_acc:.3f} ({train_graph.n_nodes} nodes)")
+    print(f"    Test graph acc:  {sage_test_acc:.3f} ({test_graph.n_nodes} nodes, UNSEEN!)")
+
+    # GCN: train on train_graph, test on test_graph
+    gcn = GCN(
+        train_graph.X.shape[1], 16, n_classes, n_layers=2,
+        lr=0.01, dropout=0.3, random_state=42
+    )
+    gcn.fit(train_graph, train_labels, train_mask_ind, n_epochs=300, verbose=False)
+
+    gcn_train_preds = gcn.predict(train_graph)
+    gcn_train_acc = np.mean(gcn_train_preds == train_labels)
+    gcn_test_preds = gcn.predict(test_graph)
+    gcn_test_acc = np.mean(gcn_test_preds == test_labels)
+
+    print(f"\n  GCN:")
+    print(f"    Train graph acc: {gcn_train_acc:.3f} ({train_graph.n_nodes} nodes)")
+    print(f"    Test graph acc:  {gcn_test_acc:.3f} ({test_graph.n_nodes} nodes, UNSEEN!)")
+
+    print(f"\n  Difference on unseen graph: GraphSAGE={sage_test_acc:.3f} vs GCN={gcn_test_acc:.3f}")
+    print("-> GraphSAGE learns GENERAL aggregation -> transfers to new graphs")
+    print("-> GCN learns graph-specific weights -> may not transfer well")
+
+    # -------- Experiment 4: Number of Layers --------
+    print("\n4. NUMBER OF LAYERS (Over-smoothing check)")
+    print("-" * 40)
+
+    for n_layers in [1, 2, 3, 4]:
+        model = GraphSAGE(
+            graph.X.shape[1], 16, n_classes, n_layers=n_layers,
+            aggregator='mean', sample_size=10, dropout=0.3,
+            lr=0.01, random_state=42
+        )
+        model.fit(graph, labels, train_mask, n_epochs=200, verbose=False)
+        preds = model.predict(graph)
+        test_acc = np.mean(preds[test_mask] == labels[test_mask])
+
+        # Measure embedding diversity (over-smoothing indicator)
+        emb = model.get_embeddings(graph)
+        norms = np.linalg.norm(emb, axis=1, keepdims=True)
+        norms = np.maximum(norms, 1e-8)
+        emb_norm = emb / norms
+        cos_sim = emb_norm @ emb_norm.T
+        avg_sim = (np.sum(cos_sim) - graph.n_nodes) / (graph.n_nodes * (graph.n_nodes - 1))
+
+        print(f"  layers={n_layers}  test_acc={test_acc:.3f}"
+              f"  avg_cos_sim={avg_sim:.3f}")
+
+    print("-> 2 layers is typically best (same as GCN)")
+    print("-> GraphSAGE's CONCAT helps: self-info preserved better")
+    print("-> Still susceptible to over-smoothing, but less than GCN")
+
+    return agg_results
+
+
+# ============================================================
+# BENCHMARK ON DATASETS
+# ============================================================
+
+def benchmark_on_datasets():
+    """Benchmark GraphSAGE across standard graph datasets."""
+    print("\n" + "=" * 60)
+    print("BENCHMARK: GraphSAGE on Graph Datasets")
+    print("=" * 60)
+
+    results = {}
+
+    datasets = {
+        'karate_club': (karate_club, 2),
+        'community_2': (lambda: create_community_graph(2, 25, 0.3, 0.02), 2),
+        'community_3': (lambda: create_community_graph(3, 20, 0.3, 0.02), 3),
+        'community_4': (lambda: create_community_graph(4, 15, 0.3, 0.02), 4),
+        'citation': (lambda: create_citation_network(100, 3, 16), 3),
+    }
+
+    print(f"\n{'Dataset':<15} {'Train Acc':<12} {'Test Acc':<12} {'Nodes':<8}")
+    print("-" * 50)
+
+    for name, (dataset_fn, n_classes) in datasets.items():
+        graph, labels = dataset_fn()
+        train_mask, val_mask, test_mask = create_transductive_split(
+            graph.n_nodes, labels, train_ratio=0.15, val_ratio=0.1
+        )
+
+        model = GraphSAGE(
+            graph.X.shape[1], 16, n_classes, n_layers=2,
+            aggregator='mean', sample_size=10, dropout=0.5,
+            lr=0.01, random_state=42
+        )
+        model.fit(graph, labels, train_mask, n_epochs=200, verbose=False)
+
+        preds = model.predict(graph)
+        train_acc = np.mean(preds[train_mask] == labels[train_mask])
+        test_acc = np.mean(preds[test_mask] == labels[test_mask])
+
+        results[name] = {'train_acc': train_acc, 'test_acc': test_acc}
+        print(f"{name:<15} {train_acc:<12.3f} {test_acc:<12.3f} {graph.n_nodes:<8}")
+
+    return results
+
+
+# ============================================================
+# VISUALIZATIONS
+# ============================================================
+
+def visualize_graphsage():
+    """
+    Main GraphSAGE visualization: 2x3 grid.
+
+    Panel 1: Ground truth (karate club)
+    Panel 2: GraphSAGE predictions
+    Panel 3: Sampling visualization
+    Panel 4: Aggregator comparison bar chart
+    Panel 5: Training curve
+    Panel 6: Correct vs incorrect predictions
+    """
+    print("\nGenerating: GraphSAGE visualization...")
+
+    fig, axes = plt.subplots(2, 3, figsize=(16, 10))
+
+    # Use karate club
+    graph, labels = karate_club()
+    n_classes = 2
+    train_mask, val_mask, test_mask = create_transductive_split(
+        graph.n_nodes, labels, train_ratio=0.15, val_ratio=0.1
+    )
+    pos = spring_layout(graph, seed=42)
+
+    # Train GraphSAGE
+    sage = GraphSAGE(
+        graph.X.shape[1], 16, n_classes, n_layers=2,
+        aggregator='mean', sample_size=10, dropout=0.3,
+        lr=0.01, random_state=42
+    )
+    losses = sage.fit(graph, labels, train_mask, n_epochs=300, verbose=False)
+
+    # --- Panel 1: Ground truth ---
+    draw_graph(graph, labels, pos, axes[0, 0],
+               title='Ground Truth\n(Karate Club)', cmap='coolwarm')
+
+    # --- Panel 2: GraphSAGE predictions ---
+    preds = sage.predict(graph)
+    test_acc = np.mean(preds[test_mask] == labels[test_mask])
+    draw_graph(graph, preds, pos, axes[0, 1],
+               title=f'GraphSAGE Predictions\ntest_acc={test_acc:.3f}', cmap='coolwarm')
+
+    # --- Panel 3: Sampling visualization ---
+    ax = axes[0, 2]
+    center_node = 0  # Node 0 (hub in karate club)
     np.random.seed(42)
+    sampled_neighbors = sage._sample_neighbors(graph, center_node, 10)
+    all_neighbors = graph.neighbors(center_node)
 
-    # 1. Aggregator comparison
-    print("\n1. AGGREGATOR TYPE")
-    print("-" * 40)
+    # Draw all edges faded
+    for i in range(graph.n_nodes):
+        for j in range(i + 1, graph.n_nodes):
+            if graph.A[i, j] > 0:
+                ax.plot([pos[i, 0], pos[j, 0]], [pos[i, 1], pos[j, 1]],
+                        'gray', alpha=0.1, linewidth=0.5)
 
-    for agg in ['mean', 'pool']:
-        accs = []
-        for _ in range(5):
-            graph, labels = karate_club()
-            graph.X = np.random.randn(graph.n_nodes, 16)
-            train_mask = np.zeros(graph.n_nodes, dtype=bool)
-            train_mask[[0, 1, 2, 30, 32, 33]] = True
+    # Highlight edges to sampled neighbors
+    for nb in sampled_neighbors:
+        ax.plot([pos[center_node, 0], pos[nb, 0]],
+                [pos[center_node, 1], pos[nb, 1]],
+                'red', alpha=0.7, linewidth=2, zorder=4)
 
-            model = GraphSAGE(n_features=16, hidden_dims=[16], n_classes=2,
-                              aggregator_type=agg)
-            model.fit(graph, labels, train_mask, epochs=200, verbose=False)
-            accs.append(np.mean(model.predict(graph) == labels))
+    # Highlight edges to un-sampled neighbors
+    unsampled = set(all_neighbors.tolist()) - set(sampled_neighbors.tolist())
+    for nb in unsampled:
+        ax.plot([pos[center_node, 0], pos[nb, 0]],
+                [pos[center_node, 1], pos[nb, 1]],
+                'orange', alpha=0.4, linewidth=1, linestyle='--', zorder=3)
 
-        print(f"{agg:<10}  accuracy={np.mean(accs):.3f} ± {np.std(accs):.3f}")
+    # Draw all nodes faded
+    ax.scatter(pos[:, 0], pos[:, 1], c='lightgray', s=40, alpha=0.4,
+               edgecolors='gray', linewidths=0.3, zorder=2)
 
-    print("→ Mean aggregator often sufficient")
+    # Highlight sampled neighbors
+    ax.scatter(pos[sampled_neighbors, 0], pos[sampled_neighbors, 1],
+               c='red', s=80, alpha=0.8, edgecolors='black', linewidths=0.5,
+               zorder=5, label=f'Sampled ({len(sampled_neighbors)})')
 
-    # 2. Sample size
-    print("\n2. SAMPLE SIZE")
-    print("-" * 40)
+    # Highlight un-sampled neighbors
+    if len(unsampled) > 0:
+        unsampled_arr = np.array(list(unsampled))
+        ax.scatter(pos[unsampled_arr, 0], pos[unsampled_arr, 1],
+                   c='orange', s=60, alpha=0.6, edgecolors='black', linewidths=0.3,
+                   zorder=5, label=f'Not sampled ({len(unsampled)})')
 
-    for sample_size in [1, 5, 10, 20]:
-        accs = []
-        for _ in range(5):
-            graph, labels = karate_club()
-            graph.X = np.random.randn(graph.n_nodes, 16)
-            train_mask = np.zeros(graph.n_nodes, dtype=bool)
-            train_mask[[0, 1, 2, 30, 32, 33]] = True
+    # Center node
+    ax.scatter([pos[center_node, 0]], [pos[center_node, 1]],
+               c='blue', s=200, alpha=0.9, edgecolors='black', linewidths=1.5,
+               zorder=6, marker='*', label=f'Node {center_node}')
 
-            model = GraphSAGE(n_features=16, hidden_dims=[16], n_classes=2,
-                              sample_sizes=[sample_size, sample_size])
-            model.fit(graph, labels, train_mask, epochs=200, verbose=False)
-            accs.append(np.mean(model.predict(graph) == labels))
+    ax.legend(loc='lower right', fontsize=7)
+    ax.set_title(f'Neighbor Sampling\nNode {center_node}: {len(all_neighbors)} neighbors,'
+                 f' sample {len(sampled_neighbors)}')
+    ax.set_aspect('equal')
+    ax.axis('off')
 
-        print(f"sample_size={sample_size:<3}  accuracy={np.mean(accs):.3f}")
+    # --- Panel 4: Aggregator comparison bar chart ---
+    ax = axes[1, 0]
+    cg, cl = create_community_graph(3, 20, 0.25, 0.02, 16, random_state=42)
+    tm, vm, tsm = create_transductive_split(cg.n_nodes, cl, 0.15, 0.1)
 
-    print("→ Sampling ~10 neighbors typically sufficient")
-
-    # 3. Number of layers
-    print("\n3. NUMBER OF LAYERS")
-    print("-" * 40)
-
-    for n_layers in [1, 2, 3]:
-        hidden_dims = [16] * (n_layers - 1) if n_layers > 1 else []
-        accs = []
-        for _ in range(5):
-            graph, labels = karate_club()
-            graph.X = np.random.randn(graph.n_nodes, 16)
-            train_mask = np.zeros(graph.n_nodes, dtype=bool)
-            train_mask[[0, 1, 2, 30, 32, 33]] = True
-
-            model = GraphSAGE(n_features=16, hidden_dims=hidden_dims, n_classes=2)
-            model.fit(graph, labels, train_mask, epochs=200, verbose=False)
-            accs.append(np.mean(model.predict(graph) == labels))
-
-        print(f"layers={n_layers}  accuracy={np.mean(accs):.3f}")
-
-    print("→ 2 layers usually optimal (like GCN)")
-
-    # 4. INDUCTIVE TEST
-    print("\n4. INDUCTIVE GENERALIZATION")
-    print("-" * 40)
-
-    inductive_accs = []
-    transductive_accs = []
-
-    for _ in range(5):
-        # Create two different graphs
-        train_graph, train_labels = create_community_graph(
-            n_communities=2, nodes_per_community=40, p_in=0.3, p_out=0.02
+    agg_accs = {}
+    for agg_name in ['mean', 'pool', 'max']:
+        model = GraphSAGE(
+            cg.X.shape[1], 16, 3, n_layers=2,
+            aggregator=agg_name, sample_size=10, dropout=0.3,
+            lr=0.01, random_state=42
         )
-        test_graph, test_labels = create_community_graph(
-            n_communities=2, nodes_per_community=40, p_in=0.3, p_out=0.02
-        )
+        model.fit(cg, cl, tm, n_epochs=200, verbose=False)
+        p = model.predict(cg)
+        agg_accs[agg_name] = np.mean(p[tsm] == cl[tsm])
 
-        train_mask = np.ones(train_graph.n_nodes, dtype=bool)
+    colors = ['#3498db', '#e74c3c', '#2ecc71']
+    bars = ax.bar(list(agg_accs.keys()), list(agg_accs.values()),
+                  color=colors, edgecolor='black', linewidth=0.5)
+    for bar, acc in zip(bars, agg_accs.values()):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
+                f'{acc:.3f}', ha='center', va='bottom', fontsize=10)
+    ax.set_ylabel('Test Accuracy')
+    ax.set_title('Aggregator Comparison\n(Community Graph)')
+    ax.set_ylim(0, 1.05)
+    ax.grid(True, alpha=0.3, axis='y')
 
-        model = GraphSAGE(n_features=8, hidden_dims=[8], n_classes=2)
-        model.fit(train_graph, train_labels, train_mask, epochs=200, verbose=False)
+    # --- Panel 5: Training curve ---
+    ax = axes[1, 1]
+    ax.plot(losses, 'b-', linewidth=1, alpha=0.8)
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Loss')
+    ax.set_title('Training Loss\n(Karate Club)')
+    ax.grid(True, alpha=0.3)
 
-        transductive_accs.append(np.mean(model.predict(train_graph) == train_labels))
-        inductive_accs.append(np.mean(model.predict(test_graph) == test_labels))
+    # --- Panel 6: Correct vs incorrect predictions ---
+    ax = axes[1, 2]
+    correct = preds == labels
+    for i in range(graph.n_nodes):
+        for j in range(i + 1, graph.n_nodes):
+            if graph.A[i, j] > 0:
+                ax.plot([pos[i, 0], pos[j, 0]], [pos[i, 1], pos[j, 1]],
+                        'gray', alpha=0.2, linewidth=0.5)
 
-    print(f"Transductive (train graph): {np.mean(transductive_accs):.3f}")
-    print(f"Inductive (new graph):      {np.mean(inductive_accs):.3f}")
-    print("→ GraphSAGE generalizes to unseen graphs!")
+    ax.scatter(pos[correct, 0], pos[correct, 1], c='green',
+               s=80, alpha=0.8, edgecolors='black', linewidths=0.5,
+               zorder=3, label='Correct')
+    ax.scatter(pos[~correct, 0], pos[~correct, 1], c='red',
+               s=100, alpha=0.9, edgecolors='black', linewidths=1,
+               zorder=4, marker='X', label='Wrong')
+    ax.legend(loc='lower right', fontsize=8)
+    ax.set_title(f'Prediction Map\n{np.sum(correct)}/{graph.n_nodes} correct')
+    ax.set_aspect('equal')
+    ax.axis('off')
+
+    plt.suptitle('GraphSAGE: Sample + Aggregate + Concat\n'
+                 'Row 1: predictions & sampling | Row 2: aggregators & training',
+                 fontsize=13, fontweight='bold')
+    plt.tight_layout()
+    return fig
+
+
+def visualize_inductive():
+    """
+    Inductive learning visualization: 1x3 grid.
+
+    Panel 1: Train graph with labels
+    Panel 2: Test graph (DIFFERENT graph, same structure type)
+    Panel 3: Comparison table: GCN vs GraphSAGE
+    """
+    print("\nGenerating: Inductive learning visualization...")
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+
+    # Create train and test graphs with DIFFERENT random seeds
+    train_graph, train_labels = create_community_graph(
+        n_communities=3, nodes_per_community=20,
+        p_in=0.25, p_out=0.02, feature_dim=16, random_state=42
+    )
+    test_graph, test_labels = create_community_graph(
+        n_communities=3, nodes_per_community=30,
+        p_in=0.25, p_out=0.02, feature_dim=16, random_state=99
+    )
+
+    train_mask = np.ones(train_graph.n_nodes, dtype=bool)
+    n_classes = 3
+
+    # Train both models on train_graph
+    sage = GraphSAGE(
+        train_graph.X.shape[1], 16, n_classes, n_layers=2,
+        aggregator='mean', sample_size=10, dropout=0.3,
+        lr=0.01, random_state=42
+    )
+    sage.fit(train_graph, train_labels, train_mask, n_epochs=300, verbose=False)
+
+    gcn = GCN(
+        train_graph.X.shape[1], 16, n_classes, n_layers=2,
+        lr=0.01, dropout=0.3, random_state=42
+    )
+    gcn.fit(train_graph, train_labels, train_mask, n_epochs=300, verbose=False)
+
+    # Evaluate on both graphs
+    sage_train_preds = sage.predict(train_graph)
+    sage_test_preds = sage.predict(test_graph)
+    gcn_train_preds = gcn.predict(train_graph)
+    gcn_test_preds = gcn.predict(test_graph)
+
+    sage_train_acc = np.mean(sage_train_preds == train_labels)
+    sage_test_acc = np.mean(sage_test_preds == test_labels)
+    gcn_train_acc = np.mean(gcn_train_preds == train_labels)
+    gcn_test_acc = np.mean(gcn_test_preds == test_labels)
+
+    # --- Panel 1: Train graph ---
+    train_pos = spring_layout(train_graph, seed=42)
+    draw_graph(train_graph, train_labels, train_pos, axes[0],
+               title=f'TRAIN Graph\n{train_graph.n_nodes} nodes, 3 communities',
+               cmap='Set1')
+
+    # --- Panel 2: Test graph with GraphSAGE predictions ---
+    test_pos = spring_layout(test_graph, seed=99)
+    ax = axes[1]
+    for i in range(test_graph.n_nodes):
+        for j in range(i + 1, test_graph.n_nodes):
+            if test_graph.A[i, j] > 0:
+                ax.plot([test_pos[i, 0], test_pos[j, 0]],
+                        [test_pos[i, 1], test_pos[j, 1]],
+                        'gray', alpha=0.2, linewidth=0.5)
+
+    correct_sage = sage_test_preds == test_labels
+    ax.scatter(test_pos[correct_sage, 0], test_pos[correct_sage, 1],
+               c=test_labels[correct_sage], cmap='Set1', s=60, alpha=0.8,
+               edgecolors='black', linewidths=0.5, zorder=3,
+               vmin=0, vmax=2)
+    if np.sum(~correct_sage) > 0:
+        ax.scatter(test_pos[~correct_sage, 0], test_pos[~correct_sage, 1],
+                   c='red', s=80, alpha=0.9, edgecolors='black', linewidths=1,
+                   zorder=4, marker='X')
+    ax.set_title(f'TEST Graph (UNSEEN!)\n{test_graph.n_nodes} nodes, '
+                 f'GraphSAGE acc={sage_test_acc:.3f}')
+    ax.set_aspect('equal')
+    ax.axis('off')
+
+    # --- Panel 3: Comparison table ---
+    ax = axes[2]
+    ax.axis('off')
+
+    table_data = [
+        ['', 'Train Graph', 'Test Graph\n(UNSEEN)'],
+        ['GraphSAGE', f'{sage_train_acc:.3f}', f'{sage_test_acc:.3f}'],
+        ['GCN', f'{gcn_train_acc:.3f}', f'{gcn_test_acc:.3f}'],
+    ]
+
+    table = ax.table(
+        cellText=table_data,
+        cellLoc='center',
+        loc='center',
+        colWidths=[0.3, 0.3, 0.3]
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(12)
+    table.scale(1.0, 2.0)
+
+    # Style the header row
+    for j in range(3):
+        table[0, j].set_facecolor('#d4e6f1')
+        table[0, j].set_text_props(fontweight='bold')
+
+    # Style the model name column
+    for i in range(1, 3):
+        table[i, 0].set_facecolor('#fdebd0')
+        table[i, 0].set_text_props(fontweight='bold')
+
+    # Highlight better test accuracy
+    if sage_test_acc >= gcn_test_acc:
+        table[1, 2].set_facecolor('#d5f5e3')
+    else:
+        table[2, 2].set_facecolor('#d5f5e3')
+
+    ax.set_title('INDUCTIVE Comparison\nTrain on 60 nodes, test on 90 nodes\n'
+                 '(different graph, same community structure)',
+                 fontsize=11, fontweight='bold')
+
+    ax.text(0.5, 0.08,
+            'GraphSAGE learns GENERAL aggregation functions\n'
+            'that transfer to unseen graphs.\n'
+            'GCN learns weights tied to specific graph structure.',
+            ha='center', va='center', fontsize=9,
+            style='italic', transform=ax.transAxes,
+            bbox=dict(boxstyle='round,pad=0.5', facecolor='lightyellow', alpha=0.8))
+
+    plt.suptitle('INDUCTIVE LEARNING: Train on one graph, test on ANOTHER',
+                 fontsize=13, fontweight='bold')
+    plt.tight_layout()
+    return fig
 
 
 # ============================================================
@@ -736,30 +1071,93 @@ def ablation_experiments():
 # ============================================================
 
 if __name__ == '__main__':
-    print("="*60)
-    print("GRAPHSAGE — Inductive Graph Learning")
-    print("="*60)
+    print("=" * 60)
+    print("GraphSAGE -- Paradigm: INDUCTIVE AGGREGATION")
+    print("=" * 60)
 
-    print(__doc__)
-
-    # Run experiments
-    ablation_experiments()
-
-    # Create visualization
-    fig = visualize_graphsage()
-    save_path = '/Users/sid47/ML Algorithms/37_graphsage.png'
-    fig.savefig(save_path, dpi=100, bbox_inches='tight')
-    print(f"\nSaved visualization to: {save_path}")
-    plt.close(fig)
-
-    print("\n" + "="*60)
-    print("SUMMARY")
-    print("="*60)
     print("""
-1. GraphSAGE: Learn to aggregate neighbor features
-2. h_v = σ(W·CONCAT(h_v, AGG(neighbors)))
-3. INDUCTIVE: Generalizes to unseen nodes/graphs!
-4. SAMPLING: Makes large graphs tractable
-5. Aggregators: Mean, Max-Pool, LSTM
-6. Key insight: Learn the aggregation, not fixed weights!
+WHAT THIS MODEL IS:
+
+    GraphSAGE = Graph SAmple and aggreGatE
+
+    For each node v, at each layer:
+        1. SAMPLE k neighbors: S(N(v))
+        2. AGGREGATE: h_N(v) = AGG({h_u : u in S(N(v))})
+        3. CONCAT:    [h_v || h_N(v)]
+        4. TRANSFORM: h_v' = sigma(W . [h_v || h_N(v)])
+
+    KEY DIFFERENCES FROM GCN:
+        GCN:       H' = sigma(A_hat H W)    (fixed aggregation)
+        GraphSAGE: h_v = W . CONCAT(h_v, AGG(neighbors))
+
+    1. CONCAT separates self from neighbors (self never lost)
+    2. SAMPLING bounds computation (scalable to large graphs)
+    3. LEARNED aggregation (generalizes to new structures)
+
+KEY HYPERPARAMETERS:
+    - aggregator: 'mean' (simple), 'pool' (expressive), 'max'
+    - sample_size: 10-25 (trade-off: accuracy vs speed)
+    - n_layers: 2 (same over-smoothing concern as GCN)
+    - hidden_dim: 16-32
+
+INDUCTIVE BIAS:
+    - HOMOPHILY: neighbors share information
+    - AGGREGATION GENERALIZES: same function works on new graphs
+    - BOUNDED NEIGHBORHOOD: sampling limits receptive field
+    """)
+
+    agg_results = ablation_experiments()
+    results = benchmark_on_datasets()
+
+    print("\nGenerating visualizations...")
+
+    fig1 = visualize_graphsage()
+    save_path1 = '/Users/sid47/ML Algorithms/37_graphsage.png'
+    fig1.savefig(save_path1, dpi=100, bbox_inches='tight')
+    print(f"Saved: {save_path1}")
+    plt.close(fig1)
+
+    fig2 = visualize_inductive()
+    save_path2 = '/Users/sid47/ML Algorithms/37_graphsage_inductive.png'
+    fig2.savefig(save_path2, dpi=100, bbox_inches='tight')
+    print(f"Saved: {save_path2}")
+    plt.close(fig2)
+
+    print("\n" + "=" * 60)
+    print("SUMMARY: What GraphSAGE Reveals")
+    print("=" * 60)
+    print("""
+1. INDUCTIVE > TRANSDUCTIVE
+   GraphSAGE learns GENERAL aggregation, not graph-specific weights.
+   Train on graph A, deploy on graph B. GCN cannot do this.
+
+2. CONCAT IS KEY
+   By explicitly separating self from neighbors:
+   h_v' = W . [h_v || AGG(neighbors)]
+   The node's own features are NEVER lost.
+   GCN's smoothing can wash out node identity.
+
+3. SAMPLING = REGULARIZATION + SCALABILITY
+   Sampling k neighbors per node:
+   - Bounds computation (O(k^L) instead of O(n))
+   - Acts as stochastic regularization (like dropout)
+   - Makes mini-batch training possible
+
+4. AGGREGATOR MATTERS (but not as much as you'd think)
+   Mean: simple, competitive baseline
+   Pool: MLP + max, most parameters, most expressive
+   Max: captures salient features, lightweight
+   In practice, mean is often good enough.
+
+5. STILL LIMITED BY HOMOPHILY
+   Like GCN, GraphSAGE assumes neighbors share information.
+   For heterophilic graphs (neighbors differ), both struggle.
+
+CONNECTION TO OTHER FILES:
+    36_gcn.py: Fixed spectral convolution (GraphSAGE's predecessor)
+    38_gat.py: Attention-weighted aggregation (learned importance)
+    39_gin.py: SUM aggregation for maximum expressiveness
+    40_mpnn.py: Unified framework that encompasses all of these
+
+NEXT: 38_gat.py -- What if different neighbors matter differently?
     """)

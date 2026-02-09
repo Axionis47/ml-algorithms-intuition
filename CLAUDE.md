@@ -1014,6 +1014,521 @@ Stick with GNN when:
 
 ---
 
+## EXPANSION: Clustering (55-58)
+
+Surprisingly absent from the original collection, clustering algorithms reveal fundamental
+differences in how we define and discover structure in data.
+
+### 55_kmeans.py — Paradigm: CENTROID PARTITIONING
+```
+===============================================================
+WHAT IT IS (THE CORE IDEA)
+===============================================================
+
+Partition data into K clusters by finding K centroids:
+
+    argmin  Σₖ Σ_{x∈Cₖ} ||x - μₖ||²
+
+Lloyd's Algorithm:
+    1. Initialize K centroids
+    2. ASSIGN: Each point → nearest centroid
+    3. UPDATE: Centroid → mean of assigned points
+    4. Repeat until convergence
+
+K-MEANS++ INITIALIZATION:
+    Spread centroids apart to avoid bad local minima:
+    - First centroid: random
+    - Each next: probability ∝ D(x)² (distance to nearest centroid)
+
+===============================================================
+INDUCTIVE BIAS
+===============================================================
+
+1. SPHERICAL CLUSTERS: Uses Euclidean distance
+2. EQUAL VARIANCE: Clusters have similar spread
+3. CONVEX CLUSTERS: Cannot find non-convex shapes
+4. K IS KNOWN: Must specify number of clusters
+
+FAILURE MODES:
+- Elongated clusters → splits them
+- Non-convex (moons, spirals) → fails completely
+- Outliers → pull centroids away
+```
+
+**Ablations:**
+- Random vs K-means++ initialization
+- Effect of K (elbow method, silhouette)
+- Convergence behavior
+- Failure on non-spherical data
+
+---
+
+### 56_hierarchical.py — Paradigm: DENDROGRAM
+```
+===============================================================
+WHAT IT IS (THE CORE IDEA)
+===============================================================
+
+Build a HIERARCHY of clusters (agglomerative = bottom-up):
+    1. Each point is its own cluster
+    2. Merge two "closest" clusters
+    3. Repeat until one cluster
+    4. Result: DENDROGRAM (tree of merges)
+
+Cut the dendrogram at any height → get K clusters!
+
+===============================================================
+LINKAGE (How to measure cluster-cluster distance)
+===============================================================
+
+SINGLE:   d(A,B) = min{d(a,b)}  → can find non-convex, but chains
+COMPLETE: d(A,B) = max{d(a,b)}  → compact clusters
+AVERAGE:  d(A,B) = mean{d(a,b)} → compromise
+WARD:     minimize variance increase → spherical (like K-means)
+
+===============================================================
+INDUCTIVE BIAS
+===============================================================
+
+1. HIERARCHY EXISTS: Assumes nested cluster structure
+2. GREEDY: Merges are permanent (can't undo)
+3. NO K REQUIRED: Choose K post-hoc by cutting dendrogram
+4. EXPENSIVE: O(n²) space, O(n³) time
+```
+
+**Ablations:**
+- Single vs Complete vs Ward linkage
+- Linkage on non-convex shapes (single wins!)
+- Dendrogram visualization and cutting
+
+---
+
+### 57_dbscan.py — Paradigm: DENSITY-BASED
+```
+===============================================================
+WHAT IT IS (THE CORE IDEA)
+===============================================================
+
+Clusters are DENSE REGIONS separated by SPARSE REGIONS.
+
+Parameters:
+- ε (eps): Neighborhood radius
+- MinPts: Minimum points to be "dense"
+
+Point types:
+- CORE: ≥ MinPts neighbors within ε
+- BORDER: Near a core point, but not core
+- NOISE: Neither → OUTLIER!
+
+Algorithm:
+1. Find all core points
+2. Connect core points within ε → clusters
+3. Add border points to nearest cluster
+4. Everything else is noise
+
+===============================================================
+INDUCTIVE BIAS
+===============================================================
+
+1. NO K REQUIRED: Clusters emerge from density
+2. ARBITRARY SHAPES: Can find moons, spirals, rings!
+3. OUTLIER DETECTION: Natural noise identification
+4. GLOBAL ε: Struggles with varying density
+```
+
+**Ablations:**
+- Effect of ε (too small → noise, too large → one cluster)
+- Effect of MinPts
+- Success on non-convex shapes
+- Failure on varying density
+
+---
+
+### 58_spectral_clustering.py — Paradigm: GRAPH LAPLACIAN
+```
+===============================================================
+WHAT IT IS (THE CORE IDEA)
+===============================================================
+
+Transform clustering into GRAPH PARTITIONING:
+
+1. Build SIMILARITY GRAPH from data (RBF kernel)
+2. Compute GRAPH LAPLACIAN: L = D - W
+3. Find eigenvectors of L (smallest eigenvalues)
+4. Cluster in EIGENSPACE using K-means
+
+Key insight: Laplacian eigenvectors encode cluster structure!
+Non-convex clusters become linearly separable in eigenspace.
+
+===============================================================
+CONNECTION TO GNNs (Graph Neural Networks)
+===============================================================
+
+Spectral clustering is the ANCESTOR of GCNs!
+- Laplacian eigenvectors = Fourier basis on graphs
+- GCN uses: H' = σ(D^(-1/2) A D^(-1/2) H W)
+- This is the normalized adjacency ≈ I - L_sym
+
+Understanding spectral clustering → understanding GNNs!
+
+===============================================================
+INDUCTIVE BIAS
+===============================================================
+
+1. GRAPH STRUCTURE: Meaningful similarity exists
+2. CLUSTERS = SUBGRAPHS: Well-separated components
+3. K STILL REQUIRED: But eigengap can help choose
+4. γ (RBF) IS CRUCIAL: Controls connectivity
+```
+
+**Ablations:**
+- Effect of gamma (RBF bandwidth)
+- RBF vs k-NN affinity
+- Eigenspace visualization
+- Eigengap analysis for choosing K
+- Connection to GCN (35_gcn.py)
+
+---
+
+### Clustering Comparison Summary
+
+| Algorithm    | K Required? | Non-Convex? | Outliers? | Complexity |
+|-------------|-------------|-------------|-----------|------------|
+| K-Means     | Yes         | No          | No        | O(nKd)     |
+| Hierarchical| No (cut)    | Single: Yes | No        | O(n³)      |
+| DBSCAN      | No (auto)   | Yes         | Yes       | O(n²)      |
+| Spectral    | Yes         | Yes         | No        | O(n³)      |
+
+**When to use what:**
+- Spherical + known K → **K-Means** (fast baseline)
+- Unknown K + outliers → **DBSCAN**
+- Non-convex + known K → **Spectral** or **DBSCAN**
+- Hierarchical structure → **Hierarchical**
+- Very large data → Mini-batch K-Means
+
+---
+
+## EXPANSION: Dimensionality Reduction (59-62)
+
+### 59_pca.py — Paradigm: LINEAR PROJECTION
+```
+===============================================================
+WHAT IT IS (THE CORE IDEA)
+===============================================================
+
+Find the directions of MAXIMUM VARIANCE in your data.
+Project onto those directions to reduce dimensions.
+
+COVARIANCE MATRIX:
+    C = (1/(n-1)) X^T X  (after centering)
+
+EIGENDECOMPOSITION:
+    C v_i = λ_i v_i
+    v_i = i-th principal component (direction)
+    λ_i = variance along that direction
+
+PROJECTION:
+    Z = X W_k    (W_k = matrix of top-k eigenvectors)
+
+===============================================================
+INDUCTIVE BIAS
+===============================================================
+
+1. LINEAR: Can only find linear subspaces
+2. VARIANCE = IMPORTANCE: Assumes high-variance = informative
+3. ORTHOGONAL: Components are mutually perpendicular
+4. GLOBAL: One projection for all data points
+```
+
+**Ablations:**
+- Number of components vs reconstruction error
+- Linear vs nonlinear data (where PCA fails)
+- Feature scaling effect
+- Denoising via low-rank reconstruction
+- Eigendecomposition vs SVD equivalence
+
+---
+
+### 60_tsne.py — Paradigm: PROBABILITY MATCHING
+```
+===============================================================
+WHAT IT IS (THE CORE IDEA)
+===============================================================
+
+Match NEIGHBORHOOD PROBABILITIES between high-D and low-D.
+
+HIGH-D: p(j|i) = exp(-||x_i - x_j||² / 2σ_i²) / Z
+LOW-D:  q_ij = (1 + ||y_i - y_j||²)^(-1) / Z  (Student-t)
+
+OBJECTIVE: KL(P || Q) — minimize divergence
+
+The CROWDING PROBLEM:
+    In high-D, a point has room for many equidistant neighbors.
+    In 2D, those neighbors must compete for limited space.
+    SOLUTION: Use heavy-tailed Student-t in low-D (more room in tails).
+
+===============================================================
+INDUCTIVE BIAS
+===============================================================
+
+1. LOCAL STRUCTURE preserved (neighbors stay near)
+2. GLOBAL STRUCTURE lost (distances between clusters meaningless)
+3. PERPLEXITY = effective number of neighbors (hyperparameter)
+4. STOCHASTIC: Different runs → different embeddings
+5. NO INVERSE: Can't project new points without re-running
+```
+
+**Ablations:**
+- Perplexity sweep (5 to 100)
+- Stochasticity across random seeds
+- Early exaggeration effect
+- Learning rate sensitivity
+
+---
+
+### 61_umap.py — Paradigm: TOPOLOGICAL EMBEDDING
+```
+===============================================================
+WHAT IT IS (THE CORE IDEA)
+===============================================================
+
+Preserve TOPOLOGICAL STRUCTURE via fuzzy simplicial sets.
+
+1. Build k-NN graph in high-D
+2. Compute fuzzy membership strengths
+3. Optimize low-D embedding via cross-entropy
+
+KEY DIFFERENCES FROM t-SNE:
+    - Uses k-NN graph (sparse) not full pairwise (dense)
+    - Cross-entropy loss (not KL divergence)
+    - Negative sampling for efficiency
+    - Spectral initialization (deterministic start)
+    - Can embed new points (has transform())
+
+===============================================================
+INDUCTIVE BIAS
+===============================================================
+
+1. MANIFOLD: Data lies on a low-dimensional manifold
+2. LOCAL METRIC: Distance is only meaningful locally
+3. n_neighbors controls local vs global balance
+4. min_dist controls cluster tightness
+```
+
+**Ablations:**
+- n_neighbors sweep (5 to 50)
+- min_dist sweep (0.0 to 0.99)
+- Initialization: spectral vs random
+
+---
+
+### 62_dimred_arena.py — Paradigm: COMPARISON
+```
+Head-to-head: PCA vs t-SNE vs UMAP on the same datasets.
+
+| Method | Linear? | Preserves   | Speed  | Deterministic? |
+|--------|---------|-------------|--------|----------------|
+| PCA    | Yes     | Variance    | Fast   | Yes            |
+| t-SNE  | No      | Local       | Slow   | No             |
+| UMAP   | No      | Local+Some  | Medium | Mostly         |
+```
+
+---
+
+## EXPANSION: Optimization Algorithms (63-65)
+
+### 63_sgd_momentum.py — Paradigm: GRADIENT DESCENT
+```
+===============================================================
+WHAT IT IS (THE CORE IDEA)
+===============================================================
+
+Follow the negative gradient downhill.
+
+VANILLA SGD:
+    θ ← θ - η ∇L(θ)
+
+MOMENTUM: Accumulate velocity like a rolling ball:
+    v ← γv + η∇L(θ)
+    θ ← θ - v
+
+NESTEROV: Look ahead before computing gradient:
+    Theoretical: v ← γv + η∇L(θ - γv)
+    Practical (Sutskever): θ ← θ - (γv_new + η∇L)
+
+===============================================================
+INDUCTIVE BIAS
+===============================================================
+
+1. GRADIENT DIRECTION is useful (smooth loss landscape)
+2. FIXED LEARNING RATE for all parameters
+3. Momentum assumes consistent gradient direction
+```
+
+**Test surfaces:** Rosenbrock, Beale, Himmelblau, Saddle
+
+**Ablations:**
+- Learning rate sweep
+- Momentum coefficient effect
+- Nesterov vs classical momentum
+- Saddle point escape behavior
+
+---
+
+### 64_adaptive_optimizers.py — Paradigm: ADAPTIVE LEARNING RATES
+```
+===============================================================
+WHAT IT IS (THE CORE IDEA)
+===============================================================
+
+Different parameters need different learning rates.
+Learn the right rate from gradient history.
+
+THE PROGRESSION:
+    SGD → needs per-param lr → AdaGrad
+    AdaGrad → lr dies → RMSprop (forget old grads)
+    RMSprop → add momentum → Adam
+    Adam → fix weight decay → AdamW
+
+KEY EQUATIONS:
+    AdaGrad:  G += g²; θ -= lr/√(G+ε) × g
+    RMSprop:  G = β×G + (1-β)×g²; θ -= lr/√(G+ε) × g
+    Adam:     m = β₁m + (1-β₁)g; v = β₂v + (1-β₂)g²
+              θ -= lr × m̂/√(v̂+ε)  (with bias correction)
+    AdamW:    θ *= (1 - lr×λ); θ -= lr × m̂/√(v̂+ε)
+
+===============================================================
+INDUCTIVE BIAS
+===============================================================
+
+1. GRADIENT MAGNITUDE tells us about curvature
+2. RECENT gradients matter more than old ones (EMA)
+3. WEIGHT DECAY ≠ L2 regularization in adaptive methods
+```
+
+**Ablations:**
+- AdaGrad learning rate accumulation (dying lr)
+- RMSprop beta effect (forgetting factor)
+- Adam bias correction (with vs without)
+- Adam vs AdamW on regularized problems
+- All optimizers on Rosenbrock
+
+---
+
+### 65_optimizer_arena.py — Paradigm: COMPARISON
+```
+Head-to-head: SGD, SGD+Momentum, AdaGrad, RMSprop, Adam, AdamW
+on Rosenbrock, Beale, Himmelblau, and Saddle surfaces.
+
+| Optimizer | Best For                     | Weakness            |
+|-----------|------------------------------|---------------------|
+| SGD       | Convex, well-conditioned     | Slow in ravines     |
+| SGD+Mom   | Most practical training      | Overshoots at turns |
+| AdaGrad   | Sparse data (NLP embeddings) | LR decays to zero   |
+| RMSProp   | Non-stationary (RL, RNNs)    | No momentum term    |
+| Adam      | Default for neural networks  | May not generalize  |
+| AdamW     | Weight decay (LLMs)          | More hyperparams    |
+
+RULE OF THUMB:
+    Start with Adam (lr=0.001) → if it works, ship it
+    If generalization matters → SGD+Momentum with LR schedule
+```
+
+---
+
+## EXPANSION: Interpretability (66-67)
+
+### 66_feature_importance.py — Paradigm: GLOBAL EXPLANATION
+```
+===============================================================
+WHAT IT IS (THE CORE IDEA)
+===============================================================
+
+Which features matter OVERALL to the model?
+
+THREE METHODS:
+1. PERMUTATION: Shuffle feature, measure performance drop
+   I_j = score(y, f(X)) - score(y, f(X_j_shuffled))
+
+2. MEAN DECREASE IMPURITY (MDI): Track impurity reduction at splits
+   Tree-specific, biased toward high-cardinality features
+
+3. PARTIAL DEPENDENCE: Vary one feature, average prediction
+   f̂_j(x_j) = (1/n) Σ f(x_j, x_{-j}^(i))
+
+===============================================================
+INDUCTIVE BIAS
+===============================================================
+
+1. Permutation assumes feature independence
+2. MDI is biased toward high-cardinality features
+3. PDP shows marginal (not conditional) effects
+4. Importance is MODEL-SPECIFIC, not dataset-specific
+```
+
+**Ablations:**
+- Permutation vs MDI agreement/disagreement
+- Effect of feature correlation
+- Linear vs nonlinear model (same features, different importance)
+- Importance stability via bootstrap
+
+---
+
+### 67_local_explanations.py — Paradigm: LOCAL EXPLANATION
+```
+===============================================================
+WHAT IT IS (THE CORE IDEA)
+===============================================================
+
+WHY did the model make THIS specific prediction?
+
+SHAPLEY VALUES (game theory):
+    Each feature's "fair share" of the prediction.
+    phi_i = average marginal contribution across all coalitions.
+    The ONLY method satisfying all fairness axioms:
+    - EFFICIENCY: contributions sum to (prediction - baseline)
+    - SYMMETRY: identical features get equal credit
+    - NULL PLAYER: irrelevant features get zero credit
+
+LIME (Local Interpretable Model-agnostic Explanations):
+    Fit a linear model LOCALLY around the prediction.
+    Perturb → predict → weight by proximity → fit linear model.
+
+===============================================================
+INDUCTIVE BIAS
+===============================================================
+
+1. SHAPLEY: Gold standard but O(2^n); sampling works with ~500+ samples
+2. LIME: Assumes locally linear boundary; kernel_width is critical
+3. Both are model-agnostic: work with ANY black-box model
+4. SHAP + LIME usually agree on top features; disagreement is informative
+```
+
+**Ablations:**
+- Sampling convergence (50 to 2000 samples)
+- SHAP on linear model (should recover coefficients)
+- SHAP vs LIME agreement
+- Explaining correct vs incorrect predictions
+
+### Interpretability Summary
+
+| Method      | Scope  | Theoretical? | Model-Agnostic? | Cost      |
+|-------------|--------|--------------|-----------------|-----------|
+| Permutation | Global | No           | Yes             | O(n×k)    |
+| MDI         | Global | No           | Trees only      | Free      |
+| PDP         | Global | No           | Yes             | O(n×grid) |
+| SHAP        | Local  | Yes (axioms) | Yes             | O(2^n)    |
+| LIME        | Local  | No           | Yes             | O(n_perturb) |
+
+**When to use what:**
+- Quick global overview → **Permutation Importance**
+- Tree models → **MDI** (fast, but verify with permutation)
+- Understand feature effects → **Partial Dependence**
+- Explain one prediction → **SHAP** (gold standard) or **LIME** (fast)
+- Debug wrong predictions → **SHAP waterfall** (shows what misled the model)
+
+---
+
 ## Implementation Checklist
 
 ### For each algorithm:
@@ -1045,6 +1560,10 @@ Examples:
 - `27_dqn.py` → `27_dqn_learning_curve.png`, `27_dqn_replay_ablation.png`
 - `36_gcn.py` → `36_gcn_oversmoothing.png`
 - `44_graph_transformer.py` → `44_graph_transformer_attention.png`
+- `59_pca.py` → `59_pca_projection.png`, `59_pca_variance.png`, `59_pca_failure.png`, `59_pca_denoising.png`
+- `60_tsne.py` → `60_tsne_perplexity.png`, `60_tsne_evolution.png`, `60_tsne_vs_pca.png`
+- `63_sgd_momentum.py` → `63_sgd_trajectories.png`, `63_sgd_lr_sweep.png`, `63_sgd_momentum_physics.png`
+- `67_local_explanations.py` → `67_shap_waterfall.png`, `67_shap_summary.png`, `67_lime_local.png`
 
 ---
 
